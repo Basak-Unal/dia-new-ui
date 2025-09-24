@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { ChatBubbleLeftRightIcon, XMarkIcon, PaperAirplaneIcon } from '@heroicons/react/24/outline';
 import { Button } from './ui/Button';
-import { chatbotAdapter } from '../adapters';
+import { chatbotAdapter } from '../adapters/chatbotAdapter';
 import clsx from 'clsx';
 
 interface Message {

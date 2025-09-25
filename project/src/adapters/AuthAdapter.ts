@@ -14,15 +14,30 @@ export class AuthAdapter {
             const text = await res.text().catch(() => '');
             throw new Error(`Login failed (${res.status}): ${text}`);
         }
-        const session: Session = await res.json();
+
+        // Backend returns: { userId, username, displayName, avatar, followingList, closeList }
+        const raw = await res.json();
+
+        // 🔒 normalize so the rest of the app can trust arrays
+        const session: Session = {
+            userId: String(raw.userId),
+            username: String(raw.username),
+            displayName: String(raw.displayName ?? raw.username),
+            avatar: raw.avatar ?? null,
+            followingList: Array.isArray(raw.followingList) ? raw.followingList.map(String) : [],
+            closeList: Array.isArray(raw.closeList) ? raw.closeList.map(String) : [],
+        };
+
+
         this.session = session;
         return session;
     }
 
+    // ... keep the rest as-is
     async signUp(input: { username: string; password: string; name?: string; surname?: string; profile_pic?: string }) {
         const payload = {
             username: input.username,
-            password: input.password, // TEST ONLY (plain), matches your backend
+            password: input.password,
             name: input.name || '',
             surname: input.surname || '',
             profile_pic: input.profile_pic || '',
@@ -39,7 +54,6 @@ export class AuthAdapter {
         });
         if (!res.ok) {
             const text = await res.text().catch(() => '');
-            // include status in the Error message so the page can parse (409/400/500)
             throw new Error(`Sign up failed (${res.status}): ${text}`);
         }
         return true;
@@ -55,8 +69,6 @@ export class AuthAdapter {
             const text = await res.text().catch(() => '');
             throw new Error(`Forgot failed (${res.status}): ${text}`);
         }
-        // In real prod, API usually returns { ok: true }
-        // In dev, your backend can return { ok: true, devToken: "..." } so you can test without email
         const json = await res.json().catch(() => ({}));
         return { devToken: (json && (json.devToken || json.token)) || undefined };
     }

@@ -137,19 +137,6 @@ export function FeedView({ variant }: FeedViewProps) {
 
   return (
       <div className="space-y-4">
-        {(variant === 'following' || variant === 'close') && (
-            <div className="flex justify-center">
-              <Button
-                  variant="outline"
-                  onClick={() => loadFeed(false)}
-                  disabled={loading}
-                  loading={loading}
-              >
-                Refresh
-              </Button>
-            </div>
-        )}
-
         <div className="space-y-4">
           {posts.map(post => (
               <PostCard key={post.id} post={post} />

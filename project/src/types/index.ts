@@ -4,7 +4,7 @@ export interface Post {
   user: string;
   Privacy: 0 | 1 | 2 | 3;
   Timestamp: number;
-  Txt: string;
+  Tx: string;
   tags?: string[];
   links?: string[];
 }

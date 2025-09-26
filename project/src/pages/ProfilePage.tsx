@@ -15,8 +15,66 @@ import {
     UserCircleIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
+import { buildApiUrl } from '../config';
 
 type TabType = 'posts' | 'followers' | 'following' | 'private' | 'about';
+
+// ---- Types & helpers (put near top of file) ----
+type FeedPost = {
+  id: string;
+  user: string;
+  privacy: 0 | 1 | 2;
+  ts: number;      // ms
+  txt: string;
+  tags?: string[];
+};
+
+function mapLambdaRow(row: any): FeedPost | null {
+  if (!row || !row.UserID || !row.Txt || row.Timestamp == null) return null;
+
+  // "atakann#1" -> ["atakann","1"]
+  const [user, privStr = "0"] = String(row.UserID).split("#");
+  const p = Number(privStr);
+  const privacy = (p === 0 || p === 1 || p === 2 ? p : 0) as 0 | 1 | 2;
+
+  const t = Number(row.Timestamp);
+  // If server already returns ms, keep; if seconds, convert
+  const ts = Number.isFinite(t) ? (t > 1e12 ? t : t * 1000) : Date.now();
+
+  return {
+    id: `${row.UserID}:${row.Timestamp}`,
+    user,
+    privacy,
+    ts,
+    txt: String(row.Txt),
+  };
+}
+
+async function parseLambdaListResponse(res: Response): Promise<any[]> {
+  // Accept BOTH shapes:
+  // 1) raw array:          [ {...}, {...} ]
+  // 2) proxy-wrapped:      { statusCode, body: "[{...},{...}]" }
+  const raw = await res.text();
+
+  // First parse JSON once
+  const parsed = JSON.parse(raw);
+
+  if (Array.isArray(parsed)) {
+    return parsed; // already the rows
+  }
+
+  // Some gateways wrap the body as JSON string; handle both string and object array
+  if (parsed && typeof parsed.body === "string") {
+    return JSON.parse(parsed.body);
+  }
+  if (parsed && Array.isArray(parsed.body)) {
+    return parsed.body;
+  }
+
+  throw new Error("Unexpected payload shape from API");
+}
+
+
 
 // --- Mock fallback data (kept so the page looks “full” until you hook real APIs)
 const mockUser = {
@@ -131,7 +189,49 @@ export default function ProfilePage() {
     ];
 
     // For demo posts, stamp username to reflect the profile being viewed
-    const demoPosts = mockPosts.map((p) => ({ ...p, user: user.username }));
+    // inside ProfilePage component
+    // ---- Inside your ProfilePage component ----
+    const [posts, setPosts] = React.useState<FeedPost[] | null>(null);
+    const [postErr, setPostErr] = React.useState<string | null>(null);
+
+    React.useEffect(() => {
+    let alive = true;
+    (async () => {
+        try {
+        setPostErr(null);
+        setPosts(null);
+
+        const targetUser = routeUser ?? session?.username ?? "guest";
+        const url = new URL(buildApiUrl("/entries"), window.location.origin);
+        url.searchParams.set("UserID", targetUser);
+
+        const res = await fetch(url.toString(), { method: "GET" });
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`API ${res.status}: ${text || res.statusText}`);
+        }
+
+        const rows = await parseLambdaListResponse(res);
+
+        const mapped: FeedPost[] = rows
+            .map(mapLambdaRow)
+            .filter(Boolean) as FeedPost[]
+
+        if (alive) setPosts(mapped);
+        } catch (e: any) {
+        if (alive) {
+            setPostErr(e?.message ?? "Failed to load posts");
+            setPosts([]); // empty state
+        }
+        }
+    })();
+    return () => {
+        alive = false;
+    };
+    // include routeUser/session?.username if you want refetch on change
+    }, [routeUser, session?.username]);
+
+
 
     return (
         <div className="max-w-4xl mx-auto">
@@ -243,7 +343,7 @@ export default function ProfilePage() {
                     <TabContent
                         tab={activeTab}
                         user={user}
-                        demoPosts={demoPosts}
+                        demoPosts={posts ?? []}
                         mockFollowers={mockFollowers}
                         mockFollowing={mockFollowing}
                     />
@@ -267,14 +367,20 @@ function TabContent({
     mockFollowing: typeof mockFollowing;
 }) {
     switch (tab) {
-        case 'posts':
-            return (
-                <div className="space-y-4">
-                    {demoPosts.map((post) => (
-                        <PostCard key={post.id} post={post} />
-                    ))}
-                </div>
-            );
+        // ---- In TabContent 'posts' case (optional: show error) ----
+        case 'posts': {
+        if (!demoPosts || demoPosts.length === 0) {
+            return <div className="text-text-muted">No posts to show yet.</div>;
+        }
+        return (
+            <div className="space-y-4">
+            {demoPosts.map((post) => (
+                <PostCard key={post.id} post={post} />
+            ))}
+            </div>
+        );
+        }
+
 
         case 'followers':
             return (

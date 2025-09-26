@@ -76,7 +76,7 @@ export function FeedView({ variant }: FeedViewProps) {
       } else if (variant === 'private') {
         const res = await feedsAdapter.getFeeds({
           mask: 8,
-          userId: "atakann",
+          userId: session?.username,
           privateAfter: privateAfter ?? undefined,
         });
         feedData = res.feeds[3];

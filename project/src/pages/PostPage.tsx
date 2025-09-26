@@ -7,8 +7,11 @@ import { config } from '../config';
 import { PRIVACY_LABELS } from '../utils/privacy';
 import { PhotoIcon, TagIcon } from '@heroicons/react/24/outline';
 import type { Post } from '../types';
+import { useAuth } from '../contexts/AuthContext';
 
 export function PostPage() {
+  const { session } = useAuth(); // Session | null
+
   const navigate = useNavigate();
   const { showToast } = useApp();
   const [formData, setFormData] = useState({
@@ -32,14 +35,16 @@ export function PostPage() {
         .filter(tag => tag.length > 0);
 
       const postData = {
-        user: config.CURRENT_USER_ID,
-        privacy: formData.privacy,
-        txt: formData.txt.trim(),
+        user: session?.username || "config.CURRENT_USER_ID",
+        Privacy: formData.privacy,
+        Txt: formData.txt.trim(),
         tags: tags.length > 0 ? tags : undefined,
         links: [], // Could extract URLs from text in a real implementation
       };
 
-      const newPost = await postAdapter.createPost(postData);
+      console.log('Got request to send:', postData);
+
+      await postAdapter.createPost(postData); 
       
       showToast('Post created successfully!', 'success');
       

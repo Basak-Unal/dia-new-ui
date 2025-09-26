@@ -1,10 +1,10 @@
 // src/types.ts
 export interface Post {
-  id: string;
+  UserID: string;
   user: string;
-  privacy: 0 | 1 | 2 | 3;
-  ts: number;
-  txt: string;
+  Privacy: 0 | 1 | 2 | 3;
+  Timestamp: number;
+  Txt: string;
   tags?: string[];
   links?: string[];
 }

@@ -1,5 +1,9 @@
 // All adapters - most are stubs that can be swapped for real implementations
 import type { Post, ActivityItem, MeetItem } from '../types';
+import { buildApiUrl } from '../config';
+
+type CreatePostResponse = Post;
+
 
 // Follow operations adapter
 export class FollowAdapter {
@@ -34,11 +38,41 @@ export class PostAdapter {
     await this.delay(500);
     const newPost: Post = {
       ...post,
-      id: `${post.user}#${Date.now()}`,
-      ts: Date.now(),
+      UserID: `${post.user}`,
+      Timestamp: Date.now(),
     };
     console.log('Created post:', newPost);
+    this.sendPost(newPost);
     return newPost;
+  }
+
+  async sendPost(post: Post): Promise<CreatePostResponse> {
+    // If Post has any non-JSON fields (e.g., File), strip or serialize them first.
+    const { imageFile, ...jsonSafe } = post as any;
+
+    const url = new URL(buildApiUrl('/new-entry'), window.location.origin);
+
+    console.log('Sending post to API:', url);
+
+    const res = await fetch(url.toString(), {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // 'Authorization': `Bearer ${token}`, // if you use auth
+        // 'Idempotency-Key': crypto.randomUUID(), // optional safety on retries
+      },
+      body: JSON.stringify(jsonSafe),
+      // credentials: 'include', // if your API uses cookies
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`API Error ${res.status}: ${text || res.statusText}`);
+    }
+
+    const data = await res.json();
+    // If API returns a wrapper, map it: return this.mapPost(data.post)
+    return data as CreatePostResponse;
   }
   
   private delay(ms: number) {

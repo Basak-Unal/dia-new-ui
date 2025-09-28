@@ -1,490 +1,367 @@
-import React, { useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import { Button } from '../components/ui/Button';
-import { PostCard } from '../components/PostCard';
-import { followAdapter } from '../adapters';
-import { useApp } from '../contexts/AppContext';
+import React, { useState, useEffect } from "react";
+import { useParams, Link } from "react-router-dom";
+import { Button } from "../components/ui/Button";
+import { PostCard } from "../components/PostCard";
+import { followAdapter } from "../adapters/FollowAdapter";
+import { useApp } from "../contexts/AppContext";
 import {
-    UserPlusIcon,
-    UserMinusIcon,
-    PencilIcon,
-    DocumentTextIcon,
-    UserGroupIcon,
-    LockClosedIcon,
-    InformationCircleIcon,
-    UserCircleIcon,
-} from '@heroicons/react/24/outline';
-import clsx from 'clsx';
-import { buildApiUrl } from '../config';
+  PencilIcon,
+  DocumentTextIcon,
+  UserGroupIcon,
+  InformationCircleIcon,
+} from "@heroicons/react/24/outline";
+import clsx from "clsx";
+import { buildApiUrl } from "../config";
 
-type TabType = 'posts' | 'followers' | 'following' | 'private' | 'about';
+type TabType = "posts" | "followers" | "following" | "about";
 
-// ---- Types & helpers (put near top of file) ----
 type FeedPost = {
   id: string;
   user: string;
   privacy: 0 | 1 | 2;
-  ts: number;      // ms
+  ts: number;
   txt: string;
   tags?: string[];
 };
 
-function mapLambdaRow(row: any): FeedPost | null {
-  if (!row || !row.UserID || !row.Txt || row.Timestamp == null) return null;
-
-  // "atakann#1" -> ["atakann","1"]
-  const [user, privStr = "0"] = String(row.UserID).split("#");
-  const p = Number(privStr);
-  const privacy = (p === 0 || p === 1 || p === 2 ? p : 0) as 0 | 1 | 2;
-
-  const t = Number(row.Timestamp);
-  // If server already returns ms, keep; if seconds, convert
-  const ts = Number.isFinite(t) ? (t > 1e12 ? t : t * 1000) : Date.now();
-
-  return {
-    id: `${row.UserID}:${row.Timestamp}`,
-    user,
-    privacy,
-    ts,
-    txt: String(row.Txt),
-  };
-}
-
-async function parseLambdaListResponse(res: Response): Promise<any[]> {
-  // Accept BOTH shapes:
-  // 1) raw array:          [ {...}, {...} ]
-  // 2) proxy-wrapped:      { statusCode, body: "[{...},{...}]" }
-  const raw = await res.text();
-
-  // First parse JSON once
-  const parsed = JSON.parse(raw);
-
-  if (Array.isArray(parsed)) {
-    return parsed; // already the rows
-  }
-
-  // Some gateways wrap the body as JSON string; handle both string and object array
-  if (parsed && typeof parsed.body === "string") {
-    return JSON.parse(parsed.body);
-  }
-  if (parsed && Array.isArray(parsed.body)) {
-    return parsed.body;
-  }
-
-  throw new Error("Unexpected payload shape from API");
-}
-
-
-
-// --- Mock fallback data (kept so the page looks “full” until you hook real APIs)
-const mockUser = {
-    id: 'alice',
-    username: 'alice',
-    displayName: 'Alice Smith',
-    bio:
-        'Software developer, coffee enthusiast, and weekend hiker. Building the future one line of code at a time.',
-    avatar: null as string | null,
-    stats: {
-        posts: 127,
-        followers: 1234,
-        following: 567,
-    },
-};
-
-const mockPosts = [
-    {
-        id: 'alice#1640000000000',
-        user: 'alice',
-        privacy: 0 as const,
-        ts: 1640000000000,
-        txt: 'Just shipped a new feature! The feeling never gets old 🚀',
-        tags: ['coding', 'productivity', 'career'],
-    },
-    {
-        id: 'alice#1639900000000',
-        user: 'alice',
-        privacy: 1 as const,
-        ts: 1639900000000,
-        txt: "Coffee shop coding session. There's something magical about the ambient noise.",
-        tags: ['coding', 'coffee', 'lifestyle'],
-    },
-];
-
-const mockFollowers = [
-    { id: 'bob', username: 'bob', displayName: 'Bob Johnson', bio: 'Designer & photographer' },
-    { id: 'charlie', username: 'charlie', displayName: 'Charlie Brown', bio: 'Product manager' },
-    { id: 'diana', username: 'diana', displayName: 'Diana Wilson', bio: 'Marketing specialist' },
-];
-
-const mockFollowing = [
-    { id: 'eve', username: 'eve', displayName: 'Eve Davis', bio: 'Tech lead' },
-    { id: 'frank', username: 'frank', displayName: 'Frank Miller', bio: 'UX researcher' },
-];
-
 export default function ProfilePage() {
-    const { user: routeUser } = useParams<{ user?: string }>();
-    const { session, showToast } = useApp();
+  const { user: routeUser } = useParams<{ user?: string }>();
+  const { session, showToast } = useApp();
 
-    // Prefer the URL param; fallback to the logged-in user
-    const profileUsername = routeUser || session?.username || 'user';
-    const isOwnProfile = !!session && profileUsername === session.username;
+  const profileUsername = routeUser || session?.username || "user";
+  const isOwnProfile = !!session && profileUsername === session.username;
 
-    // Build a user object: if it's your own profile, use session details;
-    // otherwise reuse mock (but stamped with the requested username).
-    const user = isOwnProfile
-        ? {
-            id: session.username,
-            username: session.username,
-            displayName: session.displayName || session.username,
-            bio: '', // plug your real bio here when you have it
-            avatar: session.avatar || null,
-            stats: mockUser.stats, // keep nice demo stats until you wire real numbers
-        }
-        : {
-            ...mockUser,
-            id: profileUsername,
-            username: profileUsername,
-            displayName:
-                mockUser.username === profileUsername
-                    ? mockUser.displayName
-                    : profileUsername.charAt(0).toUpperCase() + profileUsername.slice(1),
-        };
+  const [activeTab, setActiveTab] = useState<TabType>("posts");
+  const [isFollowing, setIsFollowing] = useState(
+    () => !isOwnProfile && followAdapter.isFollowing(profileUsername)
+  );
+  const [followerCount, setFollowerCount] = useState<number>(0);
+  const [loading, setLoading] = useState(false);
+  const [posts, setPosts] = useState<FeedPost[] | null>(null);
+  const [postErr, setPostErr] = useState<string | null>(null);
+  const [followers, setFollowers] = useState<string[]>([]);
+  const [following, setFollowing] = useState<string[]>([]);
 
-    const [activeTab, setActiveTab] = useState<TabType>('posts');
-    const [isFollowing, setIsFollowing] = useState(() =>
-        isOwnProfile ? false : followAdapter.isFollowing(profileUsername)
-    );
-    const [followerCount, setFollowerCount] = useState<number>(user.stats.followers);
-    const [loading, setLoading] = useState(false);
+  const tabs: { id: TabType; label: string; icon: React.FC<React.SVGProps<SVGSVGElement>> }[] = [
+    { id: "posts", label: "Posts", icon: DocumentTextIcon },
+    { id: "followers", label: "Followers", icon: UserGroupIcon },
+    { id: "following", label: "Following", icon: UserGroupIcon },
+    { id: "about", label: "About", icon: InformationCircleIcon },
+  ];
 
-    const handleFollowToggle = async () => {
-        if (isOwnProfile) return; // don't follow yourself
-        try {
-            setLoading(true);
-            if (isFollowing) {
-                await followAdapter.unfollow(profileUsername);
-                setIsFollowing(false);
-                setFollowerCount((n) => Math.max(0, n - 1));
-                showToast(`Unfollowed ${user.displayName}`, 'info');
-            } else {
-                await followAdapter.follow(profileUsername);
-                setIsFollowing(true);
-                setFollowerCount((n) => n + 1);
-                showToast(`Now following ${user.displayName}`, 'success');
-            }
-        } catch (e) {
-            showToast('Failed to update follow status', 'error');
-            throw e;
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const tabs: { id: TabType; label: string; icon: React.FC<React.SVGProps<SVGSVGElement>> }[] = [
-        { id: 'posts', label: 'Posts', icon: DocumentTextIcon },
-        { id: 'followers', label: 'Followers', icon: UserGroupIcon },
-        { id: 'following', label: 'Following', icon: UserGroupIcon },
-        ...(isOwnProfile ? [{ id: 'private', label: 'Private', icon: LockClosedIcon } as const] : []),
-        { id: 'about', label: 'About', icon: InformationCircleIcon },
-    ];
-
-    // For demo posts, stamp username to reflect the profile being viewed
-    // inside ProfilePage component
-    // ---- Inside your ProfilePage component ----
-    const [posts, setPosts] = React.useState<FeedPost[] | null>(null);
-    const [postErr, setPostErr] = React.useState<string | null>(null);
-
-    React.useEffect(() => {
+  useEffect(() => {
     let alive = true;
     (async () => {
-        try {
-        setPostErr(null);
-        setPosts(null);
-
+      try {
         const targetUser = routeUser ?? session?.username ?? "guest";
         const url = new URL(buildApiUrl("/entries"), window.location.origin);
         url.searchParams.set("UserID", targetUser);
 
-        const res = await fetch(url.toString(), { method: "GET" });
-        if (!res.ok) {
-            const text = await res.text().catch(() => "");
-            throw new Error(`API ${res.status}: ${text || res.statusText}`);
-        }
+        const res = await fetch(url.toString());
+        if (!res.ok) throw new Error(`API ${res.status}`);
 
-        const rows = await parseLambdaListResponse(res);
-
-        const mapped: FeedPost[] = rows
-            .map(mapLambdaRow)
-            .filter(Boolean) as FeedPost[]
+        const data = await res.json();
+        const mapped: FeedPost[] = (data || []).map((row: any) => ({
+          id: `${row.UserID}:${row.Timestamp}`,
+          user: String(row.UserID).split("#")[0],
+          privacy: (Number(String(row.UserID).split("#")[1]) || 0) as 0 | 1 | 2,
+          ts: Number(row.Timestamp) * (Number(row.Timestamp) < 1e12 ? 1000 : 1),
+          txt: String(row.Txt),
+        }));
 
         if (alive) setPosts(mapped);
-        } catch (e: any) {
+      } catch (e: any) {
         if (alive) {
-            setPostErr(e?.message ?? "Failed to load posts");
-            setPosts([]); // empty state
+          setPostErr(e?.message || "Failed to load posts");
+          setPosts([]);
         }
-        }
+      }
     })();
     return () => {
-        alive = false;
+      alive = false;
     };
-    // include routeUser/session?.username if you want refetch on change
-    }, [routeUser, session?.username]);
+  }, [routeUser, session?.username]);
 
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const followersList = await followAdapter.getFollowers(profileUsername);
+        const followingList = await followAdapter.getFollowing(profileUsername);
 
+        if (alive) {
+          setFollowers(followersList);
+          setFollowing(followingList);
+          setFollowerCount(followersList.length);
+        }
+      } catch (e) {
+        console.error("Failed to fetch followers/following:", e);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [profileUsername]);
 
-    return (
-        <div className="max-w-4xl mx-auto">
-            {/* Profile Header */}
-            <div className="relative bg-card rounded-2xl border border-border p-6 mb-6 overflow-hidden">
-                <div className="bg-gradient-to-r from-primary-100 to-transparent absolute inset-x-0 top-0 h-24 rounded-t-2xl opacity-50" />
+  const handleFollowToggle = async () => {
+    if (isOwnProfile || !session) return;
+    try {
+      setLoading(true);
+      if (isFollowing) {
+        await followAdapter.unfollow(session.username, profileUsername);
+        setIsFollowing(false);
+      } else {
+        await followAdapter.follow(session.username, profileUsername);
+        setIsFollowing(true);
+      }
+      const followersList = await followAdapter.getFollowers(profileUsername);
+      const followingList = await followAdapter.getFollowing(profileUsername);
+      setFollowers(followersList);
+      setFollowing(followingList);
+      setFollowerCount(followersList.length);
+      showToast(
+        isFollowing
+          ? `Unfollowed ${profileUsername}`
+          : `Now following ${profileUsername}`,
+        isFollowing ? "info" : "success"
+      );
+    } catch (e) {
+      console.error(e);
+      showToast("Failed to update follow status", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
 
-                <div className="relative">
-                    <div className="flex items-start space-x-4 mb-4">
-                        <div className="w-20 h-20 rounded-full flex items-center justify-center flex-shrink-0 bg-primary-100">
-                            {user.avatar ? (
-                                <img
-                                    src={user.avatar}
-                                    alt="avatar"
-                                    className="w-20 h-20 rounded-full object-cover"
-                                />
-                            ) : (
-                                <UserCircleIcon className="w-10 h-10 text-primary-700" />
-                            )}
-                        </div>
+  return (
+    <div className="max-w-4xl mx-auto">
+      <div className="relative bg-card rounded-2xl border border-border p-6 mb-6 overflow-hidden">
+        <div className="flex items-start space-x-4 mb-4">
+          <div className="w-20 h-20 bg-primary-100 rounded-full flex items-center justify-center">
+            <span className="text-primary-700 font-medium text-2xl">
+              {profileUsername.charAt(0).toUpperCase()}
+            </span>
+          </div>
 
-                        <div className="flex-1 min-w-0">
-                            <h1 className="text-2xl font-bold text-text mb-1">{user.displayName}</h1>
-                            <p className="text-text-muted mb-3">@{user.username}</p>
-
-                            <div className="flex items-center space-x-6 text-sm">
-                                <div>
-                                    <span className="font-semibold text-text">{user.stats.posts}</span>
-                                    <span className="text-text-muted ml-1">Posts</span>
-                                </div>
-                                <div>
-                                    <span className="font-semibold text-text">{followerCount.toLocaleString()}</span>
-                                    <span className="text-text-muted ml-1">Followers</span>
-                                </div>
-                                <div>
-                                    <span className="font-semibold text-text">{user.stats.following}</span>
-                                    <span className="text-text-muted ml-1">Following</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="flex-shrink-0">
-                            {isOwnProfile ? (
-                                <Link
-                                    to={`/settings`}
-                                    className="inline-flex items-center space-x-2 px-4 py-2 border border-primary-300 text-primary-700 rounded-lg font-medium hover:bg-primary-50 transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500"
-                                >
-                                    <PencilIcon className="w-4 h-4" />
-                                    <span>Edit Profile</span>
-                                </Link>
-                            ) : (
-                                <Button
-                                    onClick={handleFollowToggle}
-                                    loading={loading}
-                                    variant={isFollowing ? 'outline' : 'primary'}
-                                    className={clsx(
-                                        'flex items-center space-x-2 group',
-                                        isFollowing && 'hover:bg-red-50 hover:text-red-600 hover:border-red-200'
-                                    )}
-                                >
-                                    {isFollowing ? (
-                                        <>
-                                            <UserMinusIcon className="w-4 h-4" />
-                                            <span className="group-hover:hidden">Following</span>
-                                            <span className="hidden group-hover:inline">Unfollow</span>
-                                        </>
-                                    ) : (
-                                        <>
-                                            <UserPlusIcon className="w-4 h-4" />
-                                            <span>Follow</span>
-                                        </>
-                                    )}
-                                </Button>
-                            )}
-                        </div>
-                    </div>
-
-                    {user.bio && <p className="text-text leading-relaxed">{user.bio}</p>}
-                </div>
+          <div className="flex-1 min-w-0">
+            <h1 className="text-2xl font-bold text-text mb-1">{profileUsername}</h1>
+            <p className="text-text-muted mb-3">@{profileUsername}</p>
+            <div className="flex items-center space-x-6 text-sm">
+              <div>
+                <span className="font-semibold text-text">{posts?.length || 0}</span>
+                <span className="text-text-muted ml-1">Posts</span>
+              </div>
+              <div>
+                <span className="font-semibold text-text">{followerCount}</span>
+                <span className="text-text-muted ml-1">Followers</span>
+              </div>
+              <div>
+                <span className="font-semibold text-text">{following.length}</span>
+                <span className="text-text-muted ml-1">Following</span>
+              </div>
             </div>
+          </div>
 
-            {/* Tabs */}
-            <div className="bg-card rounded-2xl border border-border overflow-hidden">
-                <div className="border-b border-border">
-                    <nav className="flex overflow-x-auto">
-                        {tabs.map((tab) => {
-                            const isActive = activeTab === tab.id;
-                            return (
-                                <button
-                                    key={tab.id}
-                                    onClick={() => setActiveTab(tab.id)}
-                                    className={clsx(
-                                        'flex items-center space-x-2 px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors duration-150',
-                                        'focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500',
-                                        isActive
-                                            ? 'text-primary-600 border-b-2 border-primary-600'
-                                            : 'text-text-muted hover:text-text'
-                                    )}
-                                >
-                                    <tab.icon className="w-4 h-4" />
-                                    <span>{tab.label}</span>
-                                </button>
-                            );
-                        })}
-                    </nav>
-                </div>
-
-                <div className="p-6">
-                    <TabContent
-                        tab={activeTab}
-                        user={user}
-                        demoPosts={posts ?? []}
-                        mockFollowers={mockFollowers}
-                        mockFollowing={mockFollowing}
-                    />
-                </div>
-            </div>
+          <div className="flex-shrink-0">
+            {isOwnProfile ? (
+              <Link to={`/settings`} className="inline-flex items-center px-4 py-2 border rounded-lg">
+                <PencilIcon className="w-4 h-4" />
+                <span>Edit Profile</span>
+              </Link>
+            ) : (
+              <Button
+                onClick={handleFollowToggle}
+                loading={loading}
+                variant={isFollowing ? "outline" : "primary"}
+              >
+                {isFollowing ? "Unfollow" : "Follow"}
+              </Button>
+            )}
+          </div>
         </div>
-    );
+      </div>
+
+      <div className="bg-card rounded-2xl border border-border overflow-hidden">
+        <div className="border-b border-border">
+          <nav className="flex overflow-x-auto">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={clsx(
+                  "flex items-center px-4 py-3 text-sm font-medium",
+                  activeTab === tab.id
+                    ? "text-primary-600 border-b-2 border-primary-600"
+                    : "text-text-muted"
+                )}
+              >
+                <tab.icon className="w-4 h-4" />
+                <span>{tab.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+
+        <div className="p-6">
+          <TabContent
+            tab={activeTab}
+            posts={posts}
+            postErr={postErr}
+            followers={followers}
+            following={following}
+            profileUsername={profileUsername}
+            setFollowers={setFollowers}
+            setFollowing={setFollowing}
+            setFollowerCount={setFollowerCount}
+          />
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function TabContent({
-                        tab,
-                        user,
-                        demoPosts,
-                        mockFollowers,
-                        mockFollowing,
-                    }: {
-    tab: TabType;
-    user: typeof mockUser;
-    demoPosts: typeof mockPosts;
-    mockFollowers: typeof mockFollowers;
-    mockFollowing: typeof mockFollowing;
+  tab,
+  posts,
+  postErr,
+  followers,
+  following,
+  profileUsername,
+  setFollowers,
+  setFollowing,
+  setFollowerCount,
+}: {
+  tab: TabType;
+  posts: FeedPost[] | null;
+  postErr: string | null;
+  followers: string[];
+  following: string[];
+  profileUsername: string;
+  setFollowers: React.Dispatch<React.SetStateAction<string[]>>;
+  setFollowing: React.Dispatch<React.SetStateAction<string[]>>;
+  setFollowerCount: React.Dispatch<React.SetStateAction<number>>;
 }) {
-    switch (tab) {
-        // ---- In TabContent 'posts' case (optional: show error) ----
-        case 'posts': {
-        if (!demoPosts || demoPosts.length === 0) {
-            return <div className="text-text-muted">No posts to show yet.</div>;
-        }
-        return (
-            <div className="space-y-4">
-            {demoPosts.map((post) => (
-                <PostCard key={post.id} post={post} />
-            ))}
-            </div>
-        );
-        }
+  const { session, showToast } = useApp();
 
+  const handleTabFollowToggle = async (
+    currentUser: string,
+    targetUser: string,
+    isFollowingAlready: boolean
+  ) => {
+    try {
+      if (isFollowingAlready) {
+        await followAdapter.unfollow(currentUser, targetUser);
+      } else {
+        await followAdapter.follow(currentUser, targetUser);
+      }
+      const followersList = await followAdapter.getFollowers(profileUsername);
+      const followingList = await followAdapter.getFollowing(profileUsername);
+      setFollowers(followersList);
+      setFollowing(followingList);
+      setFollowerCount(followersList.length);
 
-        case 'followers':
-            return (
-                <div className="space-y-3">
-                    {mockFollowers.map((follower) => (
-                        <UserRow key={follower.id} user={follower} />
-                    ))}
-                </div>
-            );
-
-        case 'following':
-            return (
-                <div className="space-y-3">
-                    {mockFollowing.map((following) => (
-                        <UserRow key={following.id} user={following} />
-                    ))}
-                </div>
-            );
-
-        case 'private':
-            return (
-                <div className="text-center py-8">
-                    <LockClosedIcon className="w-12 h-12 mx-auto mb-4 text-text-muted" />
-                    <h3 className="text-lg font-medium text-text mb-2">Private Posts</h3>
-                    <p className="text-text-muted">Your private posts will appear here</p>
-                </div>
-            );
-
-        case 'about':
-            return (
-                <div className="space-y-4">
-                    <div className="bg-bg-soft rounded-lg p-4">
-                        <h3 className="font-medium text-text mb-2">Bio</h3>
-                        <p className="text-text-muted leading-relaxed">{user.bio || 'No bio available.'}</p>
-                    </div>
-
-                    <div className="bg-bg-soft rounded-lg p-4">
-                        <h3 className="font-medium text-text mb-2">Joined</h3>
-                        <p className="text-text-muted">Member since January 2023</p>
-                    </div>
-                </div>
-            );
-
-        default:
-            return null;
+      showToast(
+        isFollowingAlready
+          ? `Unfollowed ${targetUser}`
+          : `Now following ${targetUser}`,
+        isFollowingAlready ? "info" : "success"
+      );
+    } catch (e) {
+      console.error(e);
+      showToast("Failed to update follow status", "error");
     }
-}
+  };
 
-function UserRow({
-                     user,
-                 }: {
-    user: { id: string; username: string; displayName: string; bio?: string };
-}) {
-    const [isFollowing, setIsFollowing] = useState(() => followAdapter.isFollowing(user.id));
-    const [loading, setLoading] = useState(false);
-    const { showToast } = useApp();
-
-    const handleFollowToggle = async () => {
-        try {
-            setLoading(true);
-            if (isFollowing) {
-                await followAdapter.unfollow(user.id);
-                setIsFollowing(false);
-                showToast(`Unfollowed ${user.displayName}`, 'info');
-            } else {
-                await followAdapter.follow(user.id);
-                setIsFollowing(true);
-                showToast(`Now following ${user.displayName}`, 'success');
-            }
-        } catch {
-            showToast('Failed to update follow status', 'error');
-        } finally {
-            setLoading(false);
-        }
-    };
-
+  const renderUserCard = (
+    username: string,
+    isFollowingAlready: boolean,
+    isCurrentUser: boolean,
+    tabType: TabType
+  ) => {
     return (
-        <div className="flex items-center space-x-3 p-3 bg-bg-soft rounded-lg">
-            <div className="w-10 h-10 rounded-full bg-primary-100 grid place-items-center flex-shrink-0">
-                <UserCircleIcon className="w-5 h-5 text-primary-700" />
-            </div>
-
-            <div className="flex-1 min-w-0">
-                <h4 className="font-medium text-text">{user.displayName}</h4>
-                <p className="text-sm text-text-muted">@{user.username}</p>
-                {user.bio && <p className="text-sm text-text-muted mt-1 line-clamp-1">{user.bio}</p>}
-            </div>
-
-            <Button
-                size="sm"
-                variant={isFollowing ? 'outline' : 'primary'}
-                onClick={handleFollowToggle}
-                loading={loading}
-                className={clsx('group', isFollowing && 'hover:bg-red-50 hover:text-red-600 hover:border-red-200')}
-            >
-                {isFollowing ? (
-                    <>
-                        <span className="group-hover:hidden">Following</span>
-                        <span className="hidden group-hover:inline">Unfollow</span>
-                    </>
-                ) : (
-                    'Follow'
-                )}
-            </Button>
+      <div
+        key={username}
+        className="flex justify-between items-center p-4 border rounded-lg bg-card hover:shadow-md transition"
+      >
+        <div className="flex items-center space-x-4">
+          <div className="w-8 h-8 bg-primary-100 rounded-full flex items-center justify-center">
+            <span className="text-primary-700 font-medium">
+              {username.charAt(0).toUpperCase()}
+            </span>
+          </div>
+          <span className="font-medium">{username}</span>
         </div>
+
+        {!isCurrentUser && (
+          <Button
+            size="sm"
+            variant={isFollowingAlready ? "outline" : "primary"}
+            disabled={tabType === "followers" && isFollowingAlready}
+            className={clsx(
+              tabType === "followers" && isFollowingAlready && "opacity-50 cursor-not-allowed"
+            )}
+            onClick={() =>
+              handleTabFollowToggle(session!.username, username, isFollowingAlready)
+            }
+          >
+            {tabType === "followers"
+              ? isFollowingAlready
+                ? "Following"
+                : "Follow"
+              : "Unfollow"}
+          </Button>
+        )}
+      </div>
     );
+  };
+
+  if (tab === "followers") {
+    return (
+      <div className="space-y-3">
+        {followers.length === 0 ? (
+          <div className="text-text-muted">No followers yet.</div>
+        ) : (
+          followers.map((f) => {
+            const alreadyFollowing = following.includes(f);
+            const isCurrentUser = session?.username === f;
+            return renderUserCard(f, alreadyFollowing, isCurrentUser, "followers");
+          })
+        )}
+      </div>
+    );
+  }
+
+  if (tab === "following") {
+    return (
+      <div className="space-y-3">
+        {following.length === 0 ? (
+          <div className="text-text-muted">Not following anyone.</div>
+        ) : (
+          following.map((f) => {
+            const isCurrentUser = session?.username === f;
+            return renderUserCard(f, true, isCurrentUser, "following");
+          })
+        )}
+      </div>
+    );
+  }
+
+  if (tab === "posts") {
+    if (!posts || posts.length === 0) {
+      return <div className="text-text-muted">No posts to show yet.</div>;
+    }
+    return (
+      <div className="space-y-4">
+        {posts.map((post) => (
+          <PostCard key={post.id} post={post} />
+        ))}
+      </div>
+    );
+  }
+
+  if (tab === "about") {
+    return <div>About content here...</div>;
+  }
+
+  return null;
 }

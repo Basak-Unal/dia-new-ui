@@ -21,7 +21,7 @@ export function FollowingPage() {
                     <p className="text-text-muted">Posts from people you follow</p>
                 </div>
                 <div className="flex items-center gap-2 sm:ml-4">
-                    <AddFriendBar />
+                    <AddFriendBar relationIndex={0} />
                     <RefreshButton onClick={doRefresh} spinning={spinning} />
                 </div>
             </div>

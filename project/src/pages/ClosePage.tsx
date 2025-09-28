@@ -21,7 +21,7 @@ export function ClosePage() {
                     <p className="text-text-muted">Posts from your closest friends</p>
                 </div>
                 <div className="flex items-center gap-2 sm:ml-4">
-                    <AddFriendBar />
+                    <AddFriendBar relationIndex={1} />
                     <RefreshButton onClick={doRefresh} spinning={spinning} />
                 </div>
             </div>

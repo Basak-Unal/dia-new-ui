@@ -7,9 +7,18 @@ import { UserPlusIcon, CheckCircleIcon, ExclamationCircleIcon } from '@heroicons
 type Props = {
     onAdded?: (userId: string) => void;
     className?: string;
+    /** 0 = Friends, 1 = Close Friends */
+    relationIndex?: 0 | 1;
+    /** Override if your route is different; defaults to your current one */
+    apiPath?: string;
 };
 
-export default function AddFriendBar({ onAdded, className }: Props) {
+export default function AddFriendBar({
+                                         onAdded,
+                                         className,
+                                         relationIndex = 0,
+                                         apiPath = '/users/friend',
+                                     }: Props) {
     const [userId, setUserId] = useState('');
     const [loading, setLoading] = useState(false);
     const [msg, setMsg] = useState<string | null>(null);
@@ -17,8 +26,8 @@ export default function AddFriendBar({ onAdded, className }: Props) {
 
     const session = authAdapter.getSession(); // expects { username, ... }
 
-    async function addFriendApi(target: string) {
-        const resp = await fetch(buildApiUrl('/users/friend'), {
+    async function addFriendApi(target: string, idx: 0 | 1) {
+        const resp = await fetch(buildApiUrl(apiPath), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -27,18 +36,21 @@ export default function AddFriendBar({ onAdded, className }: Props) {
             body: JSON.stringify({
                 current_username: session?.username,
                 target_username: target,
+                index: idx, // <-- new lambda switch (0=friends, 1=close friends). Close also adds to friends on server.
             }),
         });
 
+        const data = await resp.json().catch(() => ({}));
+
         if (resp.status === 409) {
-            throw Object.assign(new Error('Already following'), { code: 409 });
+            const reason = (data && (data.error || data.message)) || 'Conflict';
+            throw Object.assign(new Error(reason), { code: 409, reason });
         }
         if (!resp.ok) {
-            const j = await resp.json().catch(() => ({}));
-            const m = j?.error || `Request failed (${resp.status})`;
+            const m = (data && (data.error || data.message)) || `Request failed (${resp.status})`;
             throw Object.assign(new Error(m), { code: resp.status });
         }
-        return resp.json();
+        return data;
     }
 
     const onSubmit = async (e: React.FormEvent) => {
@@ -54,14 +66,16 @@ export default function AddFriendBar({ onAdded, className }: Props) {
         setErr(null);
 
         try {
-            await addFriendApi(id);
-            setMsg(`Following @${id}`);
+            await addFriendApi(id, relationIndex);
+            setMsg(relationIndex === 0 ? `Following @${id}` : `Added @${id} to Close Friends`);
             setUserId('');
             onAdded?.(id);
             setTimeout(() => setMsg(null), 2000);
         } catch (e: any) {
             if (e?.code === 409) {
-                setErr('Already following');
+                const reason = (e?.reason || '').toString().toLowerCase();
+                if (reason.includes('close')) setErr('Already in Close Friends');
+                else setErr('Already following');
             } else if (e?.code === 404) {
                 setErr('User not found');
             } else {
@@ -73,6 +87,10 @@ export default function AddFriendBar({ onAdded, className }: Props) {
         }
     };
 
+    const placeholder =
+        relationIndex === 0 ? 'Add user (e.g., john_doe)' : 'Add close friend (e.g., john_doe)';
+    const buttonTitle = relationIndex === 0 ? 'Add Friend' : 'Add Close Friend';
+
     return (
         <div className={className}>
             <form
@@ -83,7 +101,7 @@ export default function AddFriendBar({ onAdded, className }: Props) {
                     <UserPlusIcon className="h-4 w-4 text-text-muted" aria-hidden />
                     <input
                         type="text"
-                        placeholder="Add user (e.g., john_doe)"
+                        placeholder={placeholder}
                         value={userId}
                         onChange={(e) => setUserId(e.target.value)}
                         className="w-40 sm:w-56 bg-transparent text-sm text-text placeholder:text-text-muted focus:outline-none"
@@ -93,7 +111,7 @@ export default function AddFriendBar({ onAdded, className }: Props) {
                     type="submit"
                     disabled={loading || userId.trim() === ''}
                     className="h-8 px-3 text-sm rounded-full"
-                    title="Add Friend"
+                    title={buttonTitle}
                 >
                     {loading ? 'Adding…' : 'Add'}
                 </Button>

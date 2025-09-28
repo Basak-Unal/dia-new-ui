@@ -44,6 +44,7 @@ export class AuthAdapter {
             bio: '',
             followers: [],
             following: [],
+            events_applied: [],
         };
 
         const url = buildApiUrl('users');

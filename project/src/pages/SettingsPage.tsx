@@ -1,33 +1,89 @@
-import React, { useState } from 'react';
-import { Button } from '../components/ui/Button';
-import { useApp } from '../contexts/AppContext';
-import type { Theme, Language } from '../types';
+import React, { useEffect, useState } from "react";
+import { Button } from "../components/ui/Button";
+import { useApp } from "../contexts/AppContext";
 import {
-  GlobeAltIcon,
-  MoonIcon,
-  SunIcon,
-  ComputerDesktopIcon,
   UserCircleIcon,
-  ShieldCheckIcon
-} from '@heroicons/react/24/outline';
+  ShieldCheckIcon,
+} from "@heroicons/react/24/outline";
+import { buildApiUrl } from "../config";
 
 export function SettingsPage() {
-  const { theme, language, setTheme, setLanguage, showToast } = useApp();
+  const { showToast, session } = useApp();
+
   const [profile, setProfile] = useState({
-    displayName: 'Current User',
-    bio: 'This is my bio description.',
+    name: "",
+    surname: "",
+    bio: "",
     avatar: null as File | null,
   });
   const [loading, setLoading] = useState(false);
 
+  // Fetch user profile on mount
+  useEffect(() => {
+    const fetchProfile = async () => {
+      if (!session?.username) return;
+
+      try {
+        const url = buildApiUrl(`users?username=${session.username}`);
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (!res.ok || data.message) {
+          showToast(data.message || "Failed to load profile", "error");
+          return;
+        }
+
+        setProfile({
+          name: data.name || "",
+          surname: data.surname || "",
+          bio: data.bio || "",
+          avatar: null,
+        });
+      } catch (err) {
+        console.error(err);
+        showToast("Failed to load profile", "error");
+      }
+    };
+
+    fetchProfile();
+  }, [session]);
+
   const handleSave = async () => {
+    if (!session?.username) {
+      showToast("No user session found", "error");
+      return;
+    }
+
     try {
       setLoading(true);
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      showToast('Settings saved successfully!', 'success');
+
+      const body: any = {
+        username: session.username,
+        name: profile.name,
+        surname: profile.surname,
+        bio: profile.bio,
+      };
+
+      if (profile.avatar) {
+        body.profile_pic = "TODO: Avatar upload URL";
+      }
+
+      const res = await fetch(buildApiUrl("users"), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      const result = await res.json();
+
+      if (res.ok) {
+        showToast("Settings saved successfully!", "success");
+      } else {
+        showToast(result.error || "Failed to save settings", "error");
+      }
     } catch (error) {
-      showToast('Failed to save settings', 'error');
+      console.error(error);
+      showToast("Failed to save settings", "error");
     } finally {
       setLoading(false);
     }
@@ -36,15 +92,15 @@ export function SettingsPage() {
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      if (!file.type.startsWith('image/')) {
-        showToast('Please select an image file', 'error');
+      if (!file.type.startsWith("image/")) {
+        showToast("Please select an image file", "error");
         return;
       }
-      if (file.size > 2 * 1024 * 1024) { // 2MB limit
-        showToast('Avatar size must be less than 2MB', 'error');
+      if (file.size > 2 * 1024 * 1024) {
+        showToast("Avatar size must be less than 2MB", "error");
         return;
       }
-      setProfile(prev => ({ ...prev, avatar: file }));
+      setProfile((prev) => ({ ...prev, avatar: file }));
     }
   };
 
@@ -56,62 +112,6 @@ export function SettingsPage() {
       </div>
 
       <div className="space-y-6">
-        {/* General Settings */}
-        <section className="bg-card rounded-2xl border border-border p-6">
-          <div className="flex items-center space-x-3 mb-4">
-            <GlobeAltIcon className="w-5 h-5 text-primary-600" />
-            <h3 className="text-lg font-semibold text-text">General</h3>
-          </div>
-
-          <div className="space-y-4">
-            {/* Language Setting */}
-            <div>
-              <label htmlFor="language" className="block text-sm font-medium text-text mb-2">
-                Language
-              </label>
-              <select
-                id="language"
-                value={language}
-                onChange={(e) => setLanguage(e.target.value as Language)}
-                className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-              >
-                <option value="en">English</option>
-                <option value="tr">Türkçe</option>
-              </select>
-            </div>
-
-            {/* Theme Setting */}
-            <div>
-              <label className="block text-sm font-medium text-text mb-2">
-                Theme
-              </label>
-              <div className="grid grid-cols-3 gap-3">
-                {([
-                  { value: 'light' as Theme, label: 'Light', icon: SunIcon },
-                  { value: 'dark' as Theme, label: 'Dark', icon: MoonIcon },
-                  { value: 'system' as Theme, label: 'System', icon: ComputerDesktopIcon },
-                ] as const).map((option) => (
-                  <button
-                    key={option.value}
-                    onClick={() => setTheme(option.value)}
-                    className={`
-                      flex flex-col items-center justify-center p-3 rounded-lg border transition-colors duration-150
-                      focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500
-                      ${theme === option.value
-                        ? 'bg-primary-100 border-primary-300 text-primary-700'
-                        : 'border-border hover:bg-bg-soft text-text-muted hover:text-text'
-                      }
-                    `}
-                  >
-                    <option.icon className="w-5 h-5 mb-1" />
-                    <span className="text-sm font-medium">{option.label}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </section>
-
         {/* Profile Settings */}
         <section className="bg-card rounded-2xl border border-border p-6">
           <div className="flex items-center space-x-3 mb-4">
@@ -128,7 +128,7 @@ export function SettingsPage() {
               <div className="flex items-center space-x-4">
                 <div className="w-16 h-16 bg-primary-100 rounded-full flex items-center justify-center flex-shrink-0">
                   <span className="text-lg font-bold text-primary-700">
-                    {profile.displayName.charAt(0)}
+                    {profile.name?.charAt(0) || ""}
                   </span>
                 </div>
                 <div className="flex-1">
@@ -141,7 +141,7 @@ export function SettingsPage() {
                   />
                   <label
                     htmlFor="avatar-upload"
-                    className="cursor-pointer inline-block px-4 py-2 bg-bg-soft border border-border rounded-lg text-sm font-medium text-text hover:bg-primary-50 hover:border-primary-300 transition-colors duration-150"
+                    className="cursor-pointer inline-block px-4 py-2 bg-bg-soft border border-border rounded-lg text-sm font-medium hover:bg-primary-50"
                   >
                     Choose File
                   </label>
@@ -152,33 +152,61 @@ export function SettingsPage() {
               </div>
             </div>
 
-            {/* Display Name */}
+            {/* First Name */}
             <div>
-              <label htmlFor="displayName" className="block text-sm font-medium text-text mb-2">
-                Display Name
+              <label
+                htmlFor="name"
+                className="block text-sm font-medium text-text mb-2"
+              >
+                First Name
               </label>
               <input
                 type="text"
-                id="displayName"
-                value={profile.displayName}
-                onChange={(e) => setProfile(prev => ({ ...prev, displayName: e.target.value }))}
-                className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-                placeholder="Your display name"
+                id="name"
+                value={profile.name}
+                onChange={(e) =>
+                  setProfile((prev) => ({ ...prev, name: e.target.value }))
+                }
+                className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+              />
+            </div>
+
+            {/* Surname */}
+            <div>
+              <label
+                htmlFor="surname"
+                className="block text-sm font-medium text-text mb-2"
+              >
+                Surname
+              </label>
+              <input
+                type="text"
+                id="surname"
+                value={profile.surname}
+                onChange={(e) =>
+                  setProfile((prev) => ({ ...prev, surname: e.target.value }))
+                }
+                className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
               />
             </div>
 
             {/* Bio */}
             <div>
-              <label htmlFor="bio" className="block text-sm font-medium text-text mb-2">
+              <label
+                htmlFor="bio"
+                className="block text-sm font-medium text-text mb-2"
+              >
                 Bio
               </label>
               <textarea
                 id="bio"
                 value={profile.bio}
-                onChange={(e) => setProfile(prev => ({ ...prev, bio: e.target.value }))}
+                onChange={(e) =>
+                  setProfile((prev) => ({ ...prev, bio: e.target.value }))
+                }
                 rows={3}
                 maxLength={300}
-                className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none"
+                className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 resize-none"
                 placeholder="Tell us about yourself..."
               />
               <p className="text-xs text-text-muted mt-1">
@@ -194,26 +222,24 @@ export function SettingsPage() {
             <ShieldCheckIcon className="w-5 h-5 text-primary-600" />
             <h3 className="text-lg font-semibold text-text">Privacy</h3>
           </div>
-
-          <div className="space-y-4">
-            <div className="bg-bg-soft rounded-lg p-4">
-              <h4 className="font-medium text-text mb-2">Data & Privacy</h4>
-              <p className="text-text-muted text-sm mb-3">
-                Your data is kept secure and private. We only collect necessary information to provide our services.
-              </p>
-              <div className="space-y-2 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-text-muted">Profile visibility</span>
-                  <span className="text-text font-medium">Public</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-text-muted">Search visibility</span>
-                  <span className="text-text font-medium">Enabled</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-text-muted">Activity status</span>
-                  <span className="text-text font-medium">Enabled</span>
-                </div>
+          <div className="bg-bg-soft rounded-lg p-4">
+            <h4 className="font-medium text-text mb-2">Data & Privacy</h4>
+            <p className="text-text-muted text-sm mb-3">
+              Your data is kept secure and private. We only collect necessary
+              information to provide our services.
+            </p>
+            <div className="space-y-2 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-text-muted">Profile visibility</span>
+                <span className="text-text font-medium">Public</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-text-muted">Search visibility</span>
+                <span className="text-text font-medium">Enabled</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-text-muted">Activity status</span>
+                <span className="text-text font-medium">Enabled</span>
               </div>
             </div>
           </div>
@@ -221,11 +247,7 @@ export function SettingsPage() {
 
         {/* Save Button */}
         <div className="flex justify-end">
-          <Button
-            onClick={handleSave}
-            loading={loading}
-            className="px-8"
-          >
+          <Button onClick={handleSave} loading={loading} className="px-8">
             Save Changes
           </Button>
         </div>

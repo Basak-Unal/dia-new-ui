@@ -14,6 +14,15 @@ interface FeedViewProps {
 }
 
 export function FeedView({ variant }: FeedViewProps) {
+    const scrollToTop = () => {
+    try {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch {
+      // fallback for very old UAs
+      window.scrollTo(0, 0);
+    }
+  };
+  
   const { session } = useAuth();
   const username = session?.username;
 
@@ -40,7 +49,7 @@ export function FeedView({ variant }: FeedViewProps) {
       let newNextPrivateAfter: number | null = null;
 
       if (variant === 'public') {
-        const res = await feedsAdapter.getFeeds({ mask: 1, publicPage });
+        const res = await feedsAdapter.getFeeds({ mask: 1, publicPage: publicPage });
         feedData = res.feeds[0] ?? [];
         // heuristic: server page size assumed 10; adjust if yours differs
         setHasMore(feedData.length === 10);
@@ -84,15 +93,17 @@ export function FeedView({ variant }: FeedViewProps) {
   }, [variant, publicPage, friendsPage, closePage, privateAfter, username]);
 
   useEffect(() => {
-    // reset paging when variant or user changes
     setPublicPage(0);
     setFriendsPage(0);
     setClosePage(0);
     setPrivateAfter(null);
     setNextPrivateAfter(null);
     setPosts([]);
+  }, [variant, username]);
+  // 2) Load whenever the inputs change (including page changes)
+  useEffect(() => {
     loadFeed(false);
-  }, [variant, username, loadFeed]);
+  }, [variant, publicPage, friendsPage, closePage, privateAfter, loadFeed]);
 
   if (loading && posts.length === 0) {
     return <Loading text="Loading feed..." />;
@@ -134,7 +145,7 @@ export function FeedView({ variant }: FeedViewProps) {
             <div className="flex items-center justify-center space-x-4 pt-4">
               <Button
                   variant="outline"
-                  onClick={() => setPublicPage(p => Math.max(0, p - 1))}
+                  onClick={() => {scrollToTop(); setPublicPage(p => Math.max(0, p - 1))}}
                   disabled={publicPage === 0 || loading}
               >
                 Previous
@@ -142,8 +153,8 @@ export function FeedView({ variant }: FeedViewProps) {
               <span className="text-text-muted">Page {publicPage + 1}</span>
               <Button
                   variant="outline"
-                  onClick={() => setPublicPage(p => p + 1)}
-                  disabled={!hasMore || loading}
+                  onClick={() => {scrollToTop(); setPublicPage(p => p + 1)}}
+                  disabled={publicPage === 2 || loading}
                   loading={loading}
               >
                 Next
@@ -156,7 +167,7 @@ export function FeedView({ variant }: FeedViewProps) {
             <div className="flex items-center justify-center space-x-4 pt-4">
               <Button
                   variant="outline"
-                  onClick={() => setFriendsPage(p => Math.max(0, p - 1))}
+                  onClick={() => {scrollToTop(); setFriendsPage(p => Math.max(0, p - 1))}}
                   disabled={friendsPage === 0 || loading}
               >
                 Previous
@@ -164,7 +175,7 @@ export function FeedView({ variant }: FeedViewProps) {
               <span className="text-text-muted">Page {friendsPage + 1}</span>
               <Button
                   variant="outline"
-                  onClick={() => setFriendsPage(p => p + 1)}
+                  onClick={() => {scrollToTop(); setFriendsPage(p => p + 1)}}
                   disabled={!hasMore || loading}
                   loading={loading}
               >
@@ -178,7 +189,7 @@ export function FeedView({ variant }: FeedViewProps) {
             <div className="flex items-center justify-center space-x-4 pt-4">
               <Button
                   variant="outline"
-                  onClick={() => setClosePage(p => Math.max(0, p - 1))}
+                  onClick={() => {scrollToTop(); setClosePage(p => Math.max(0, p - 1))}}
                   disabled={closePage === 0 || loading}
               >
                 Previous
@@ -186,7 +197,7 @@ export function FeedView({ variant }: FeedViewProps) {
               <span className="text-text-muted">Page {closePage + 1}</span>
               <Button
                   variant="outline"
-                  onClick={() => setClosePage(p => p + 1)}
+                  onClick={() => {scrollToTop(); setClosePage(p => p + 1)}}
                   disabled={!hasMore || loading}
                   loading={loading}
               >

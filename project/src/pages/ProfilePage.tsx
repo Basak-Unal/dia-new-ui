@@ -12,6 +12,7 @@ import {
 } from "@heroicons/react/24/outline";
 import clsx from "clsx";
 import { buildApiUrl } from "../config";
+import type { Post } from "../types";
 
 type TabType = "posts" | "followers" | "following" | "about";
 
@@ -37,7 +38,7 @@ export default function ProfilePage() {
   );
   const [followerCount, setFollowerCount] = useState<number>(0);
   const [loading, setLoading] = useState(false);
-  const [posts, setPosts] = useState<FeedPost[] | null>(null);
+  const [posts, setPosts] = useState<Post[] | null>(null);
   const [postErr, setPostErr] = useState<string | null>(null);
   const [followers, setFollowers] = useState<string[]>([]);
   const [following, setFollowing] = useState<string[]>([]);
@@ -61,13 +62,26 @@ export default function ProfilePage() {
         if (!res.ok) throw new Error(`API ${res.status}`);
 
         const data = await res.json();
-        const mapped: FeedPost[] = (data || []).map((row: any) => ({
+        const mapped: Post[] = (data || []).map((row: any) => {
+        const username = String(row.UserID).split("#")[0];
+        const privacyNum = Number(String(row.UserID).split("#")[1]) || 0;
+        const tsNum = Number(row.Timestamp);
+        return {
+          // if your Post type also has an id, keep it; otherwise remove this key field from PostCard
+          // @ts-ignore (only if Post doesn't declare id)
           id: `${row.UserID}:${row.Timestamp}`,
-          user: String(row.UserID).split("#")[0],
-          privacy: (Number(String(row.UserID).split("#")[1]) || 0) as 0 | 1 | 2,
-          ts: Number(row.Timestamp) * (Number(row.Timestamp) < 1e12 ? 1000 : 1),
-          txt: String(row.Txt),
-        }));
+          UserID: String(row.UserID),
+          user: username,
+          Privacy: privacyNum as Post["Privacy"],
+          Timestamp: tsNum < 1e12 ? tsNum * 1000 : tsNum, // ms
+          Txt: String(row.Txt),
+          tags: row.tags ?? row.Tags ?? undefined,
+          links: row.links ?? undefined,
+          History: Array.isArray(row.History)
+            ? row.History.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
+            : undefined,
+        };
+      });
 
         if (alive) setPosts(mapped);
       } catch (e: any) {
@@ -232,7 +246,7 @@ function TabContent({
   setFollowerCount,
 }: {
   tab: TabType;
-  posts: FeedPost[] | null;
+  posts: Post[] | null;
   postErr: string | null;
   followers: string[];
   following: string[];

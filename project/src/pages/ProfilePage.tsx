@@ -16,15 +16,6 @@ import type { Post } from "../types";
 
 type TabType = "posts" | "followers" | "following" | "about";
 
-type FeedPost = {
-  id: string;
-  user: string;
-  privacy: 0 | 1 | 2;
-  ts: number;
-  txt: string;
-  tags?: string[];
-};
-
 export default function ProfilePage() {
   const { user: routeUser } = useParams<{ user?: string }>();
   const { session, showToast } = useApp();
@@ -63,25 +54,25 @@ export default function ProfilePage() {
 
         const data = await res.json();
         const mapped: Post[] = (data || []).map((row: any) => {
-        const username = String(row.UserID).split("#")[0];
-        const privacyNum = Number(String(row.UserID).split("#")[1]) || 0;
-        const tsNum = Number(row.Timestamp);
-        return {
-          // if your Post type also has an id, keep it; otherwise remove this key field from PostCard
-          // @ts-ignore (only if Post doesn't declare id)
-          id: `${row.UserID}:${row.Timestamp}`,
-          UserID: String(row.UserID),
-          user: username,
-          Privacy: privacyNum as Post["Privacy"],
-          Timestamp: tsNum < 1e12 ? tsNum * 1000 : tsNum, // ms
-          Txt: String(row.Txt),
-          tags: row.tags ?? row.Tags ?? undefined,
-          links: row.links ?? undefined,
-          History: Array.isArray(row.History)
-            ? row.History.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
-            : undefined,
-        };
-      });
+          const username = String(row.UserID).split("#")[0];
+          const privacyNum = Number(String(row.UserID).split("#")[1]) || 0;
+          const tsNum = Number(row.Timestamp);
+          return {
+            // if your Post type also has an id, keep it; otherwise remove this key field from PostCard
+            // @ts-ignore (only if Post doesn't declare id)
+            id: `${row.UserID}:${row.Timestamp}`,
+            UserID: String(row.UserID),
+            user: username,
+            Privacy: privacyNum as Post["Privacy"],
+            Timestamp: tsNum < 1e12 ? tsNum * 1000 : tsNum, // ms
+            Txt: String(row.Txt),
+            tags: row.tags ?? row.Tags ?? undefined,
+            links: row.links ?? undefined,
+            History: Array.isArray(row.History)
+              ? row.History.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
+              : undefined,
+          };
+        });
 
         if (alive) setPosts(mapped);
       } catch (e: any) {

@@ -150,6 +150,7 @@ export class FeedsAdapter {
       txt: item.Txt,
       tags: item.Tags,
       links: item.Links,
+      History: item.History,
     };
   }
 }

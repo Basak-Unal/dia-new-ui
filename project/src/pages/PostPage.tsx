@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom';
 import { Button } from '../components/ui/Button';
 import { postAdapter } from '../adapters';
 import { useApp } from '../contexts/AppContext';
-import { config } from '../config';
 import { PRIVACY_LABELS } from '../utils/privacy';
 import { PhotoIcon, TagIcon } from '@heroicons/react/24/outline';
 import type { Post } from '../types';
@@ -11,14 +10,19 @@ import { useAuth } from '../contexts/AuthContext';
 
 export function PostPage() {
   const { session } = useAuth(); // Session | null
-
   const navigate = useNavigate();
   const { showToast } = useApp();
+
   const [formData, setFormData] = useState({
     txt: '',
-    privacy: 0 as Post['privacy'],
+    privacy: 0 as Post['Privacy'], // note: capital P in your interface
     tags: '',
     imageFile: null as File | null,
+
+    // NEW: history-related fields
+    wantHistory: false,
+    dexEmail: '',
+    dexPassword: '',
   });
   const [loading, setLoading] = useState(false);
 
@@ -28,28 +32,40 @@ export function PostPage() {
 
     try {
       setLoading(true);
-      
+
       const tags = formData.tags
         .split(',')
         .map(tag => tag.trim())
         .filter(tag => tag.length > 0);
 
-      const postData = {
-        user: session?.username || "config.CURRENT_USER_ID",
+      // Base payload
+      const postData: any = {
+        user: session?.username || 'config.CURRENT_USER_ID',
         Privacy: formData.privacy,
         Txt: formData.txt.trim(),
         tags: tags.length > 0 ? tags : undefined,
-        links: [], // Could extract URLs from text in a real implementation
+        links: [], // placeholder
       };
 
-      console.log('Got request to send:', postData);
+      // Only include history fields if the user opted in
+      if (formData.wantHistory) {
+        postData.WantHistory = true;
+        postData.DexEmail = formData.dexEmail.trim();
+        postData.Password = formData.dexPassword; // backend should NOT store this
+      }
 
-      await postAdapter.createPost(postData); 
-      
+      console.log('Got request to send:', {
+        ...postData,
+        // never log secrets - mask for safety
+        ...(postData.Password ? { Password: '***' } : {}),
+      });
+
+      await postAdapter.createPost(postData);
+
       showToast('Post created successfully!', 'success');
-      
+
       // Navigate to appropriate feed based on privacy level
-      const routes = {
+      const routes: Record<number, string> = {
         0: '/',
         1: '/following',
         2: '/close',
@@ -67,12 +83,11 @@ export function PostPage() {
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      // Validate file type and size
       if (!file.type.startsWith('image/')) {
         showToast('Please select an image file', 'error');
         return;
       }
-      if (file.size > 5 * 1024 * 1024) { // 5MB limit
+      if (file.size > 5 * 1024 * 1024) {
         showToast('Image size must be less than 5MB', 'error');
         return;
       }
@@ -83,6 +98,10 @@ export function PostPage() {
   const removeImage = () => {
     setFormData(prev => ({ ...prev, imageFile: null }));
   };
+
+  const historyFieldsInvalid =
+    formData.wantHistory &&
+    (!formData.dexEmail.trim() || !formData.dexPassword);
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -124,7 +143,7 @@ export function PostPage() {
           <label className="block text-sm font-medium text-text mb-2">
             Image (Optional)
           </label>
-          
+
           {!formData.imageFile ? (
             <div className="relative">
               <input
@@ -194,7 +213,7 @@ export function PostPage() {
           <select
             id="privacy"
             value={formData.privacy}
-            onChange={(e) => setFormData(prev => ({ ...prev, privacy: parseInt(e.target.value) as Post['privacy'] }))}
+            onChange={(e) => setFormData(prev => ({ ...prev, privacy: parseInt(e.target.value) as Post['Privacy'] }))}
             className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
           >
             <option value={0}>Public - Everyone can see this post</option>
@@ -202,6 +221,59 @@ export function PostPage() {
             <option value={2}>Close Friends - Only close friends can see this</option>
             <option value={3}>Private - Only you can see this</option>
           </select>
+        </div>
+
+        {/* NEW: Include Dexcom history */}
+        <div className="mb-6 border rounded-lg p-4">
+          <label className="flex items-center space-x-2 mb-3">
+            <input
+              type="checkbox"
+              checked={formData.wantHistory}
+              onChange={(e) => setFormData(prev => ({ ...prev, wantHistory: e.target.checked }))}
+              className="h-4 w-4"
+            />
+            <span className="text-sm font-medium text-text">
+              Include last 2 hours from Dexcom
+            </span>
+          </label>
+
+          {formData.wantHistory && (
+            <div className="space-y-3">
+              <div>
+                <label htmlFor="dexEmail" className="block text-sm text-text mb-1">
+                  Dexcom Email / Username
+                </label>
+                <input
+                  id="dexEmail"
+                  type="email"
+                  autoComplete="username"
+                  value={formData.dexEmail}
+                  onChange={(e) => setFormData(prev => ({ ...prev, dexEmail: e.target.value }))}
+                  className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  placeholder="you@example.com"
+                  required
+                />
+              </div>
+              <div>
+                <label htmlFor="dexPassword" className="block text-sm text-text mb-1">
+                  Dexcom Password
+                </label>
+                <input
+                  id="dexPassword"
+                  type="password"
+                  autoComplete="current-password"
+                  value={formData.dexPassword}
+                  onChange={(e) => setFormData(prev => ({ ...prev, dexPassword: e.target.value }))}
+                  className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  placeholder="••••••••"
+                  required
+                />
+              </div>
+              <p className="text-xs text-text-muted">
+                We’ll only use these once to fetch your last 2 hours and won’t store your password.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Action Buttons */}
@@ -213,7 +285,7 @@ export function PostPage() {
           >
             Cancel
           </Button>
-          
+
           <div className="flex items-center space-x-3">
             <span className="text-sm text-text-muted">
               Posting to: <span className="font-medium text-primary-600">
@@ -223,7 +295,11 @@ export function PostPage() {
             <Button
               type="submit"
               loading={loading}
-              disabled={!formData.txt.trim() || formData.txt.length > 2000}
+              disabled={
+                !formData.txt.trim() ||
+                formData.txt.length > 2000 ||
+                historyFieldsInvalid
+              }
             >
               Post
             </Button>

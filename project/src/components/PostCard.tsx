@@ -3,6 +3,8 @@ import { formatDate, PRIVACY_LABELS, PRIVACY_COLORS, getPrivacyIcon } from '../u
 import { useApp } from '../contexts/AppContext';
 import type { Post } from '../types';
 import * as Icons from '@heroicons/react/24/outline';
+import Sparkline from "./Sparkline";
+
 
 interface PostCardProps {
   post: Post;
@@ -18,6 +20,18 @@ export function PostCard({ post }: PostCardProps) {
   const maxTags = window.innerWidth < 768 ? 4 : 6;
   const visibleTags = tagsExpanded ? post.tags : post.tags?.slice(0, maxTags);
   const hiddenTagsCount = (post.tags?.length || 0) - maxTags;
+
+  const history = post.History ?? [];
+  const hasHistory = Array.isArray(history) && history.length >= 2;
+  const latest = hasHistory ? history[history.length - 1] : undefined;
+
+  // choose a tint via Tailwind text-* classes (affects currentColor)
+  let sparkClass = "text-emerald-500";
+  let tint = "text-emerald-500";
+  if (typeof latest === "number") {
+    if (latest < 70) sparkClass = "text-red-500";
+    else if (latest > 180) sparkClass = "text-amber-500";
+  }
 
   return (
     <article className="bg-card rounded-2xl shadow-sm border border-border p-4 hover:shadow-md transition-shadow duration-150">
@@ -48,6 +62,28 @@ export function PostCard({ post }: PostCardProps) {
       <div className="text-text mb-3 whitespace-pre-wrap leading-relaxed">
         {post.txt}
       </div>
+
+      {hasHistory && (
+        <div className="mt-3 border-t pt-3">
+          <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">
+            <span>Last 2h</span>
+            <span className="tabular-nums">Blood Sugar at post: {latest} mg/dL</span>
+          </div>
+
+          <Sparkline
+            data={history}
+            width={360}
+            height={96}
+            lineClassName={tint}               // line/area/dot color
+            axisClassName="text-muted-foreground" // grid + y-labels muted
+            rangeLow={90}
+            rangeHigh={160}
+            // optional: custom ticks (otherwise auto)
+            // yTicks={[60, 100, 140, 180, 220]}
+          />
+        </div>
+      )}
+
 
       {post.tags && post.tags.length > 0 && (
         <div className="flex flex-wrap gap-1 mb-2">

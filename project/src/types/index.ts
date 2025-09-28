@@ -2,17 +2,12 @@
 export interface Post {
   UserID: string;
   user: string;
-<<<<<<< HEAD
   Privacy: 0 | 1 | 2 | 3;
   Timestamp: number;
-  Tx: string;
-=======
-  privacy: 0 | 1 | 2 | 3; // 0=Public, 1=Followers, 2=Close, 3=Private
-  ts: number;
-  txt: string;
->>>>>>> chatbot
+  Txt: string;
   tags?: string[];
   links?: string[];
+  History?: number[];
 }
 
 export type Session = {

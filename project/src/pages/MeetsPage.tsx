@@ -3,10 +3,16 @@ import { Loading } from '../components/ui/Loading';
 import { EmptyState } from '../components/ui/EmptyState';
 import { ErrorState } from '../components/ui/ErrorState';
 import { Button } from '../components/ui/Button';
-import { meetsAdapter } from '../adapters';
+//import { meetsAdapter } from '../adapters';
 import { formatDate, PRIVACY_LABELS } from '../utils/privacy';
 import { useApp } from '../contexts/AppContext';
+import { useAuth } from '../contexts/AuthContext'; // <-- add
 import type { MeetItem } from '../types';
+import { buildApiUrl } from '../config';
+
+import { buildGetUrl } from '../utils/http';
+
+
 import { 
   CalendarIcon,
   MapPinIcon,
@@ -18,27 +24,229 @@ import {
   UserIcon,
   UsersIcon
 } from '@heroicons/react/24/outline';
-import { clsx } from 'clsx';
 
-type FilterType = 'upcoming' | 'past' | 'mine' | 'all';
+import clsx from 'clsx';
+
+function startOfTodayMs() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+type FilterType = 'all' | 'mine' | 'upcoming' | 'past';
+
+export interface GetMeetsParams {
+  filterType: FilterType;
+  type: string;        // UI "Type" dropdown
+  validUntil: string;  // UI date input: 'YYYY-MM-DD' or ''
+  city: string;        // UI city input
+  username?: string;   // required for 'mine'
+}
+
+export interface MeetItem {
+  id: string;
+  title?: string;
+  host?: string;
+  when: number;      // epoch ms
+  where: string;
+  desc?: string;
+  privacy?: 0|1|2|3;
+  going: number;
+  max?: number;
+  // ... add any other fields you render
+}
+
+// ---- helpers ----
+function endOfDayEpochMsFromDateInput(dateStr?: string): number {
+  if (!dateStr) return Date.now(); // fallback to now when empty
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return Date.now();
+  const dt = new Date(y, m - 1, d, 23, 59, 59, 0);
+  return dt.getTime();
+}
+
+async function getJSON<T>(url: URL): Promise<T> {
+  const res = await fetch(url.toString(), { method: 'GET', headers: { 'Accept': 'application/json' } });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API Error ${res.status}: ${text || res.statusText}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export async function putJSON<T>(path: string, body: any): Promise<T> {
+  const url = new URL(buildApiUrl(path), window.location.origin);
+  const res = await fetch(url.toString(), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API Error ${res.status}: ${text || res.statusText}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+export const meetsAdapter = {
+  async getFeed(filters: { type: string; validUntil: string; city: string }): Promise<MeetItem[]> {
+    const url = buildGetUrl('/activity/explore', {
+      ActivityType: filters.type || 'meetup',
+      ValidUntill: endOfDayEpochMsFromDateInput(filters.validUntil),
+      City: filters.city || 'Ankara',
+    });
+    const data = await getJSON<{ count: number; items: any[] }>(url);
+    return (data.items ?? []).map((it) => ({
+      id: it.id || `${it.ActivityType}-${it.City}-${it.ValidUntill}`,
+      title: it.ActivityType,
+      host: it.Host || it.host || '—',
+      when: Number(it.ValidUntill) || Date.now(),
+      where: it.City,
+      desc: it.Description,
+      privacy: it.Privacy ?? undefined,
+      going: it.Going ?? it.going ?? 0,
+      max: it.Max ?? it.max ?? undefined,
+    }));
+  },
+
+  async getSelf(UserID: string): Promise<MeetItem[]> {
+    const url = buildGetUrl('/activity/self', { UserID });
+    const data = await getJSON<{ count: number; items: any[] }>(url);
+    return (data.items ?? []).map((it) => ({
+      id: it.id,
+      title: it.title || it.ActivityType || 'My meet',
+      host: it.host || UserID,
+      when: Number(it.when ?? it.ValidUntill ?? Date.now()),
+      where: it.where ?? it.City ?? '—',
+      desc: it.desc ?? it.Description,
+      privacy: it.privacy ?? undefined,
+      going: it.going ?? 0,
+      max: it.max ?? undefined,
+    }));
+  },
+
+  async getMeets(params: GetMeetsParams): Promise<MeetItem[]> {
+    const { filterType, type, validUntil, city, username } = params;
+    const now = Date.now();
+
+    // helper sorters
+    const asc = (a: MeetItem, b: MeetItem) => a.when - b.when;
+    const desc = (a: MeetItem, b: MeetItem) => b.when - a.when;
+
+    if (filterType === 'mine') {
+      const mine = await this.getSelf(username || '');
+      const upcoming = mine.filter(m => m.when >= now).sort(asc);
+      const past     = mine.filter(m => m.when <  now).sort(desc);
+      return [...upcoming, ...past];
+    }
+
+    const all = await this.getFeed({ type, validUntil, city });
+
+    if (filterType === 'upcoming') {
+      return all.filter(m => m.when >= now).sort(asc);
+    }
+    if (filterType === 'past') {
+      return all.filter(m => m.when < now).sort(desc);
+    }
+
+    // 'all'
+    const upcoming = all.filter(m => m.when >= now).sort(asc);
+    const past     = all.filter(m => m.when <  now).sort(desc);
+    return [...upcoming, ...past];
+  },
+
+
+  async getMeetTypes(): Promise<string[]> {
+    // temporary; replace with GET to your endpoint if available
+    return ['meetup', 'challenge', 'hard challenge', 'sports', 'technology_share', 'supply_exchange'];
+  },
+
+  async createMeet(meetData: any): Promise<void> {
+    // keep POST for create
+    const url = new URL(buildApiUrl('/meets/create'), window.location.origin);
+    const res = await fetch(url.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(meetData),
+    });
+    if (!res.ok) throw new Error(`API Error ${res.status}: ${await res.text().catch(()=> '')}`);
+  },
+
+  async rsvp(meetId: string): Promise<void> {
+    const url = new URL(buildApiUrl('/meets/rsvp'), window.location.origin);
+    const res = await fetch(url.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: meetId }),
+    });
+    if (!res.ok) throw new Error(`API Error ${res.status}: ${await res.text().catch(()=> '')}`);
+  },
+
+  async unrsvp(meetId: string): Promise<void> {
+    const url = new URL(buildApiUrl('/meets/unrsvp'), window.location.origin);
+    const res = await fetch(url.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: meetId }),
+    });
+    if (!res.ok) throw new Error(`API Error ${res.status}: ${await res.text().catch(()=> '')}`);
+  },
+
+  hasRSVP(_meetId: string): boolean { return false; },
+
+  async putActivity(params: {
+    // (!) Put your final values into these fields before calling:
+    ActivityType: string;      // (!)
+    ValidUntill: number;       // (!) epoch ms
+    City: string;              // (!)
+    Description: string;       // (!)
+    Signed: boolean;           // (!)
+    Finished: boolean;         // (!)
+    Host: string;
+  }): Promise<{ id?: string }> {
+    return putJSON<{ id?: string }>('/activity/put', params);
+  },
+
+   buildActivityFromForm(form: {
+    title: string;
+    when: string;  // 'YYYY-MM-DDTHH:mm'
+    where: string;
+    desc?: string;
+  }) {
+    return {
+      ActivityType: /* (!) choose your mapping e.g. */ form.title || 'meetup',        // (!)
+      ValidUntill:  new Date(form.when).getTime(),                                     // (!) or endOfDayEpochMsFromDateInput(form.when.split('T')[0])
+      City:         /* (!) e.g. */ form.where,                                         // (!)
+      Description:  /* (!) e.g. */ (form.desc ?? ''),                                  // (!)
+      Signed:       /* (!) true/false, default false */ false,                         // (!)
+      Finished:     /* (!) true/false, default false */ false,                         // (!)
+    };
+  },
+};
 
 const FILTER_ICONS = (iconSize: number) => ({
+  all: <UsersIcon className={`w-${iconSize} h-${iconSize}`} />,
+  mine: <UserIcon className={`w-${iconSize} h-${iconSize}`} />,
   upcoming: <ClockIcon className={`w-${iconSize} h-${iconSize}`} />,
   past: <ArchiveBoxIcon className={`w-${iconSize} h-${iconSize}`} />,
-  mine: <UserIcon className={`w-${iconSize} h-${iconSize}`} />,
-  all: <UsersIcon className={`w-${iconSize} h-${iconSize}`} />
 });
 
 export function MeetsPage() {
   const { language, showToast } = useApp();
+
+  const {session} = useAuth();
+  const username = session?.username || '';
+
   const [meets, setMeets] = useState<MeetItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [filterType, setFilterType] = useState<FilterType>('upcoming');
+  const [filterType, setFilterType] = useState<FilterType>('all');
   const [type, setType] = useState<string>('');
   const [validUntil, setValidUntil] = useState<string>('');
   const [city, setCity] = useState<string>('');
+
+  const [applied, setApplied] = useState({ type: '', validUntil: '', city: '' });
 
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -51,9 +259,10 @@ export function MeetsPage() {
       setError(null);
       const data = await meetsAdapter.getMeets({
         filterType,
-        type,
-        validUntil,
-        city
+        type: applied.type,
+        validUntil: applied.validUntil,
+        city: applied.city,
+        username
       });
       setMeets(data);
     } catch (err) {
@@ -75,7 +284,7 @@ export function MeetsPage() {
   useEffect(() => {
     loadTypeOptions();
     loadMeets();
-  }, [filterType, type, validUntil, city]);
+  }, [filterType, applied]);
 
   const handleRSVP = async (meetId: string, currentlyGoing: boolean) => {
     try {
@@ -141,7 +350,7 @@ export function MeetsPage() {
           <div>
             {sidebarOpen && <h2 className="text-xl font-bold mb-4">Filters</h2>}
             <div>
-              {(['upcoming', 'past', 'mine', 'all'] as FilterType[]).map(typeOption => (
+              {(['all', 'mine', 'upcoming', 'past'] as FilterType[]).map(typeOption => (
                 <button
                   key={typeOption}
                   onClick={() => setFilterType(typeOption)}
@@ -169,7 +378,6 @@ export function MeetsPage() {
                 onChange={(e) => setType(e.target.value)}
                 className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
               >
-                <option value="">All Types</option>
                 {typeOptions.map(opt => (
                   <option key={opt} value={opt}>{opt}</option>
                 ))}
@@ -206,7 +414,10 @@ export function MeetsPage() {
 
           {/* Apply Button */}
           {sidebarOpen && (
-            <Button onClick={loadMeets} className="w-full">
+            <Button
+              onClick={() => setApplied({ type, validUntil, city })}
+              className="w-full"
+            >
               Apply Filters
             </Button>
           )}
@@ -232,6 +443,7 @@ export function MeetsPage() {
         {/* Create Form */}
         {showCreateForm && (
           <CreateMeetForm
+            typeOptions={typeOptions}
             onSuccess={() => {
               setShowCreateForm(false);
               loadMeets();
@@ -255,83 +467,120 @@ export function MeetsPage() {
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {meets.map(meet => {
               const hasRSVP = meetsAdapter.hasRSVP(meet.id);
-              const isUpcoming = meet.when > Date.now();
+
+              // "Past the date of today" = before today's 00:00
+              const isPastDay = meet.when < startOfTodayMs();
+              const isUpcoming = meet.when > Date.now(); // keep your time-based join logic
               const isFull = meet.max && meet.going >= meet.max;
 
               return (
                 <div
                   key={meet.id}
-                  className="bg-card rounded-2xl shadow-sm border border-border p-6 hover:shadow-md transition-shadow duration-150"
+                  className={clsx(
+                    "rounded-2xl shadow-sm border p-6 hover:shadow-md transition-shadow duration-150",
+                    isPastDay ? "border-red-200 bg-red-50/80" : "border-border bg-card"
+                  )}
                 >
                   <div className="mb-4">
                     <div className="flex items-start justify-between mb-2">
-                      <h3 className="font-semibold text-text text-lg">{meet.title}</h3>
-                      {meet.privacy !== undefined && (
-                        <span className="text-xs px-2 py-1 bg-primary-100 text-primary-700 rounded-full">
-                          {PRIVACY_LABELS[meet.privacy]}
-                        </span>
-                      )}
+                      <h3 className={clsx("font-semibold text-lg",
+                        isPastDay ? "text-red-700" : "text-text"
+                      )}>
+                        {meet.title}
+                      </h3>
+
+                      <div className="flex items-center gap-2">
+                        {isPastDay && (
+                          <span className="text-xs px-2 py-1 bg-red-100 text-red-700 rounded-full">
+                            Past
+                          </span>
+                        )}
+                        {meet.privacy !== undefined && (
+                          <span className={clsx(
+                            "text-xs px-2 py-1 rounded-full",
+                            isPastDay ? "bg-red-100 text-red-700" : "bg-primary-100 text-primary-700"
+                          )}>
+                            {PRIVACY_LABELS[meet.privacy]}
+                          </span>
+                        )}
+                      </div>
                     </div>
 
-                    <div className="flex items-center text-text-muted text-sm mb-2">
+                    <div className={clsx("flex items-center text-sm mb-2",
+                      isPastDay ? "text-red-600" : "text-text-muted"
+                    )}>
                       <UserGroupIcon className="w-4 h-4 mr-1" />
                       <span>Hosted by {meet.host}</span>
                     </div>
-                  </div>
-
-                  <div className="space-y-3 mb-4">
-                    <div className="flex items-center text-text-muted text-sm">
-                      <CalendarIcon className="w-4 h-4 mr-2 flex-shrink-0" />
-                      <span>{new Date(meet.when).toLocaleString(language === 'tr' ? 'tr-TR' : 'en-US')}</span>
                     </div>
 
-                    <div className="flex items-start text-text-muted text-sm">
-                      <MapPinIcon className="w-4 h-4 mr-2 flex-shrink-0 mt-0.5" />
-                      <span>{meet.where}</span>
+                    <div className="space-y-3 mb-4">
+                      <div className={clsx("flex items-center text-sm",
+                        isPastDay ? "text-red-600" : "text-text-muted"
+                      )}>
+                        <CalendarIcon className="w-4 h-4 mr-2 flex-shrink-0" />
+                        <span>{new Date(meet.when).toLocaleString(language === 'tr' ? 'tr-TR' : 'en-US')}</span>
+                      </div>
+
+                      <div className={clsx("flex items-start text-sm",
+                        isPastDay ? "text-red-600" : "text-text-muted"
+                      )}>
+                        <MapPinIcon className="w-4 h-4 mr-2 flex-shrink-0 mt-0.5" />
+                        <span>{meet.where}</span>
+                      </div>
+
+                      {meet.desc && (
+                        <p className={clsx("text-sm leading-relaxed",
+                          isPastDay ? "text-red-800" : "text-text"
+                        )}>
+                          {meet.desc}
+                        </p>
+                      )}
                     </div>
 
-                    {meet.desc && (
-                      <p className="text-text text-sm leading-relaxed">{meet.desc}</p>
-                    )}
-                  </div>
+                    <div className="flex items-center justify-between">
+                      <div className={clsx("flex items-center text-sm",
+                        isPastDay ? "text-red-700" : "text-text-muted"
+                      )}>
+                        <UserGroupIcon className="w-4 h-4 mr-1" />
+                        <span>
+                          {meet.going} going{meet.max && ` / ${meet.max}`}
+                        </span>
+                      </div>
 
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center text-text-muted text-sm">
-                      <UserGroupIcon className="w-4 h-4 mr-1" />
-                      <span>
-                        {meet.going} going
-                        {meet.max && ` / ${meet.max}`}
-                      </span>
+                      {isUpcoming && (
+                        <Button
+                          size="sm"
+                          variant={hasRSVP ? 'outline' : 'primary'}
+                          onClick={() => handleRSVP(meet.id, hasRSVP)}
+                          disabled={!hasRSVP && isFull}
+                          className={clsx(
+                            'flex items-center space-x-1',
+                            hasRSVP
+                              ? (isPastDay
+                                  ? 'bg-red-100 text-red-700 border-red-200'
+                                  : 'hover:bg-red-50 hover:text-red-600 hover:border-red-200')
+                              : undefined
+                          )}
+                        >
+                          {hasRSVP ? (
+                            <>
+                              <CheckIcon className="w-3 h-3" />
+                              <span>Going</span>
+                            </>
+                          ) : (
+                            <>
+                              <PlusIcon className="w-3 h-3" />
+                              <span>{isFull ? 'Full' : 'Join'}</span>
+                            </>
+                          )}
+                        </Button>
+                      )}
                     </div>
-
-                    {isUpcoming && (
-                      <Button
-                        size="sm"
-                        variant={hasRSVP ? 'outline' : 'primary'}
-                        onClick={() => handleRSVP(meet.id, hasRSVP)}
-                        disabled={!hasRSVP && isFull}
-                        className={clsx(
-                          'flex items-center space-x-1',
-                          hasRSVP && 'hover:bg-red-50 hover:text-red-600 hover:border-red-200'
-                        )}
-                      >
-                        {hasRSVP ? (
-                          <>
-                            <CheckIcon className="w-3 h-3" />
-                            <span>Going</span>
-                          </>
-                        ) : (
-                          <>
-                            <PlusIcon className="w-3 h-3" />
-                            <span>{isFull ? 'Full' : 'Join'}</span>
-                          </>
-                        )}
-                      </Button>
-                    )}
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+
           </div>
         )}
       </main>
@@ -342,11 +591,20 @@ export function MeetsPage() {
 interface CreateMeetFormProps {
   onSuccess: () => void;
   onCancel: () => void;
+  typeOptions: string[];
 }
 
-function CreateMeetForm({ onSuccess, onCancel }: CreateMeetFormProps) {
+interface CreateMeetFormProps {
+  onSuccess: () => void;
+  onCancel: () => void;
+  typeOptions?: string[]; // <-- new (optional)
+}
+
+function CreateMeetForm({ onSuccess, onCancel, typeOptions = [] }: CreateMeetFormProps) {
+  const { session } = useAuth();
+
   const [formData, setFormData] = useState({
-    title: '',
+    type: '',   // <-- use "type" instead of "title"
     when: '',
     where: '',
     desc: '',
@@ -355,23 +613,31 @@ function CreateMeetForm({ onSuccess, onCancel }: CreateMeetFormProps) {
   });
   const [loading, setLoading] = useState(false);
 
+  // If options arrive later, preselect the first
+  useEffect(() => {
+    if (typeOptions.length && !formData.type) {
+      setFormData(prev => ({ ...prev, type: typeOptions[0] }));
+    }
+  }, [typeOptions]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.title || !formData.when || !formData.where) return;
+    if (!formData.type || !formData.when || !formData.where) return;
 
     try {
       setLoading(true);
-      const meetData = {
-        host: 'currentuser',
-        title: formData.title,
-        when: new Date(formData.when).getTime(),
-        where: formData.where,
-        desc: formData.desc || undefined,
-        privacy: formData.privacy,
-        max: formData.max ? parseInt(formData.max) : undefined,
+
+      const activityPayload = {
+        ActivityType: formData.type,                          // <-- use dropdown value
+        ValidUntill: new Date(formData.when).getTime(),
+        City:        formData.where,
+        Description: formData.desc || '',
+        Signed:      false,
+        Finished:    false,
+        Host:        session?.username || 'unknown',
       };
 
-      await meetsAdapter.createMeet(meetData);
+      await meetsAdapter.putActivity(activityPayload);
       onSuccess();
     } catch (error) {
       console.error('Failed to create meetup:', error);
@@ -385,20 +651,28 @@ function CreateMeetForm({ onSuccess, onCancel }: CreateMeetFormProps) {
       <h3 className="text-lg font-semibold text-text mb-4">Create New Meetup</h3>
 
       <form onSubmit={handleSubmit} className="space-y-4">
-        {/* Title */}
+        {/* Type (dropdown) */}
         <div>
-          <label htmlFor="title" className="block text-sm font-medium text-text mb-1">
-            Title *
+          <label htmlFor="type" className="block text-sm font-medium text-text mb-1">
+            Type *
           </label>
-          <input
-            type="text"
-            id="title"
-            value={formData.title}
-            onChange={(e) => setFormData(prev => ({ ...prev, title: e.target.value }))}
-            className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
-            placeholder="Coffee & Code Session"
+          <select
+            id="type"
+            value={formData.type || ''} // keep controlled when loading
+            onChange={(e) => setFormData(prev => ({ ...prev, type: e.target.value }))}
+            className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
             required
-          />
+          >
+            {/* Placeholder to avoid empty + required issues while loading */}
+            {!formData.type && (
+              <option value="" disabled>
+                {typeOptions.length ? 'Select a type' : 'Loading…'}
+              </option>
+            )}
+            {(typeOptions ?? []).map(opt => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
         </div>
 
         {/* When & Max */}
@@ -412,7 +686,7 @@ function CreateMeetForm({ onSuccess, onCancel }: CreateMeetFormProps) {
               id="when"
               value={formData.when}
               onChange={(e) => setFormData(prev => ({ ...prev, when: e.target.value }))}
-              className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
               required
             />
           </div>
@@ -426,24 +700,24 @@ function CreateMeetForm({ onSuccess, onCancel }: CreateMeetFormProps) {
               id="max"
               value={formData.max}
               onChange={(e) => setFormData(prev => ({ ...prev, max: e.target.value }))}
-              className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
               placeholder="20"
               min="1"
             />
           </div>
         </div>
 
-        {/* Location */}
+        {/* City */}
         <div>
           <label htmlFor="where" className="block text-sm font-medium text-text mb-1">
-            Location *
+            City *
           </label>
           <input
             type="text"
             id="where"
             value={formData.where}
             onChange={(e) => setFormData(prev => ({ ...prev, where: e.target.value }))}
-            className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+            className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
             placeholder="Startup Café, Downtown"
             required
           />
@@ -459,7 +733,7 @@ function CreateMeetForm({ onSuccess, onCancel }: CreateMeetFormProps) {
             value={formData.desc}
             onChange={(e) => setFormData(prev => ({ ...prev, desc: e.target.value }))}
             rows={3}
-            className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+            className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
             placeholder="Tell people what to expect..."
           />
         </div>
@@ -473,7 +747,7 @@ function CreateMeetForm({ onSuccess, onCancel }: CreateMeetFormProps) {
             id="privacy"
             value={formData.privacy}
             onChange={(e) => setFormData(prev => ({ ...prev, privacy: parseInt(e.target.value) as 0 | 1 | 2 | 3 }))}
-            className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+            className="w-full px-3 py-2 border border-border rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
           >
             <option value={0}>Public</option>
             <option value={1}>Followers</option>
@@ -487,7 +761,11 @@ function CreateMeetForm({ onSuccess, onCancel }: CreateMeetFormProps) {
           <Button type="button" variant="outline" onClick={onCancel}>
             Cancel
           </Button>
-          <Button type="submit" loading={loading} disabled={!formData.title || !formData.when || !formData.where}>
+          <Button
+            type="submit"
+            loading={loading}
+            disabled={!formData.type || !formData.when || !formData.where} // <-- use type
+          >
             Create Meetup
           </Button>
         </div>

@@ -138,52 +138,6 @@ export function PostPage() {
           </div>
         </div>
 
-        {/* Image Upload */}
-        <div className="mb-6">
-          <label className="block text-sm font-medium text-text mb-2">
-            Image (Optional)
-          </label>
-
-          {!formData.imageFile ? (
-            <div className="relative">
-              <input
-                type="file"
-                accept="image/*"
-                onChange={handleImageChange}
-                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-              />
-              <div className="border-2 border-dashed border-border rounded-lg p-6 text-center hover:border-primary-300 hover:bg-bg-soft transition-colors duration-150">
-                <PhotoIcon className="w-8 h-8 mx-auto mb-2 text-text-muted" />
-                <p className="text-sm text-text-muted">
-                  Click to upload an image
-                </p>
-                <p className="text-xs text-text-muted mt-1">
-                  PNG, JPG up to 5MB
-                </p>
-              </div>
-            </div>
-          ) : (
-            <div className="relative">
-              <div className="flex items-center justify-between p-3 bg-bg-soft rounded-lg border border-border">
-                <div className="flex items-center space-x-3">
-                  <PhotoIcon className="w-5 h-5 text-primary-600" />
-                  <span className="text-sm text-text">{formData.imageFile.name}</span>
-                  <span className="text-xs text-text-muted">
-                    {(formData.imageFile.size / 1024 / 1024).toFixed(1)}MB
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={removeImage}
-                  className="text-red-500 hover:text-red-700 text-sm font-medium"
-                >
-                  Remove
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-
         {/* Tags Input */}
         <div className="mb-6">
           <label htmlFor="tags" className="block text-sm font-medium text-text mb-2">
@@ -201,7 +155,7 @@ export function PostPage() {
             />
           </div>
           <p className="text-xs text-text-muted mt-1">
-            Separate tags with commas to help others find your post
+            Tags will be automatically created, you can make additional tags here.
           </p>
         </div>
 

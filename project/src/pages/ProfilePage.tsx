@@ -63,9 +63,9 @@ export default function ProfilePage() {
             id: `${row.UserID}:${row.Timestamp}`,
             UserID: String(row.UserID),
             user: username,
-            Privacy: privacyNum as Post["Privacy"],
-            Timestamp: tsNum < 1e12 ? tsNum * 1000 : tsNum, // ms
-            Txt: String(row.Txt),
+            privacy: privacyNum as Post["Privacy"],
+            ts: tsNum < 1e12 ? tsNum * 1000 : tsNum, // ms
+            txt: String(row.Txt),
             tags: row.tags ?? row.Tags ?? undefined,
             links: row.links ?? undefined,
             History: Array.isArray(row.History)

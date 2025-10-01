@@ -18,7 +18,7 @@ export function PostCard({ post }: PostCardProps) {
   const { language } = useApp();
   const [tagsExpanded, setTagsExpanded] = useState(false);
 
-  const privacyIconName = getPrivacyIcon(post.privacy);
+  const privacyIconName = getPrivacyIcon(post.Privacy);
   const IconComponent = Icons[privacyIconName as keyof typeof Icons] as React.ComponentType<any>;
 
   const maxTags = window.innerWidth < 768 ? 4 : 6;

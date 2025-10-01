@@ -60,7 +60,7 @@ export class FeedsAdapter {
     // /feeds convention: [public, friends, close, private]
     return {
       feeds: [
-        (data.feeds?.[1] ?? []).map((it: any) => this.mapFeedItem(it)), // friends bucket
+        (data.feeds?.[1] ?? []).map((it: any) => this.mapFeedItem(it, 1)), // friends bucket
         [],                                                             // placeholder to satisfy PairFeedsResponse
       ],
     };
@@ -89,7 +89,7 @@ export class FeedsAdapter {
     return {
       feeds: [
         [],                                                             // placeholder
-        (data.feeds?.[2] ?? []).map((it: any) => this.mapFeedItem(it)), // close bucket
+        (data.feeds?.[2] ?? []).map((it: any) => this.mapFeedItem(it, 2)), // close bucket
       ],
     };
   }
@@ -126,7 +126,7 @@ export class FeedsAdapter {
     };
   }
 
-  private mapFeedItem(item: any): Post {
+  private mapFeedItem(item: any, privacy?: number): Post {
     const uid = String(item.UserID ?? '');
     const [user] = uid.split('#');
     const ts = Number(item.Timestamp ?? 0);
@@ -153,7 +153,7 @@ export class FeedsAdapter {
     return {
       id: postId,                     // (already used by your UI keys)
       user,                           // existing lowercase field your UI uses
-      privacy: item.Privacy,          // existing lowercase field your UI uses
+      privacy: (item.Privacy != null)? item.Privacy : (privacy != null)? privacy : 3,
       ts,
       txt: item.Txt,
       tags: item.Tags,

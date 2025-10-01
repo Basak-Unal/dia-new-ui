@@ -14,16 +14,16 @@ interface FeedViewProps {
 }
 
 export function FeedView({ variant }: FeedViewProps) {
-    const scrollToTop = () => {
+  const scrollToTop = () => {
     try {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      window.scrollTo({top: 0, behavior: 'smooth'});
     } catch {
       // fallback for very old UAs
       window.scrollTo(0, 0);
     }
   };
-  
-  const { session } = useAuth();
+
+  const {session} = useAuth();
   const username = session?.username;
 
   const [posts, setPosts] = useState<Post[]>([]);
@@ -49,7 +49,7 @@ export function FeedView({ variant }: FeedViewProps) {
       let newNextPrivateAfter: number | null = null;
 
       if (variant === 'public') {
-        const res = await feedsAdapter.getFeeds({ mask: 1, publicPage: publicPage });
+        const res = await feedsAdapter.getFeeds({mask: 1, publicPage: publicPage});
         feedData = res.feeds[0] ?? [];
         // heuristic: server page size assumed 10; adjust if yours differs
         setHasMore(feedData.length === 10);
@@ -106,7 +106,7 @@ export function FeedView({ variant }: FeedViewProps) {
   }, [variant, publicPage, friendsPage, closePage, privateAfter, loadFeed]);
 
   if (loading && posts.length === 0) {
-    return <Loading text="Loading feed..." />;
+    return <Loading text="Loading feed..."/>;
   }
 
   if (error) {
@@ -124,10 +124,10 @@ export function FeedView({ variant }: FeedViewProps) {
   if (posts.length === 0) {
     return (
         <EmptyState
-            icon={<DocumentTextIcon />}
+            icon={<DocumentTextIcon/>}
             title="No posts yet"
             description={emptyDescription}
-            action={{ label: 'Refresh', onClick: () => loadFeed(false) }}
+            action={{label: 'Refresh', onClick: () => loadFeed(false)}}
         />
     );
   }
@@ -136,7 +136,9 @@ export function FeedView({ variant }: FeedViewProps) {
       <div className="space-y-4">
         <div className="space-y-4">
           {posts.map(post => (
-              <PostCard key={post.id} post={post} />
+              <div key={post.id} className="space-y-2">
+                <PostCard post={post}/>
+              </div>
           ))}
         </div>
 
@@ -145,7 +147,10 @@ export function FeedView({ variant }: FeedViewProps) {
             <div className="flex items-center justify-center space-x-4 pt-4">
               <Button
                   variant="outline"
-                  onClick={() => {scrollToTop(); setPublicPage(p => Math.max(0, p - 1))}}
+                  onClick={() => {
+                    scrollToTop();
+                    setPublicPage(p => Math.max(0, p - 1))
+                  }}
                   disabled={publicPage === 0 || loading}
               >
                 Previous
@@ -153,7 +158,10 @@ export function FeedView({ variant }: FeedViewProps) {
               <span className="text-text-muted">Page {publicPage + 1}</span>
               <Button
                   variant="outline"
-                  onClick={() => {scrollToTop(); setPublicPage(p => p + 1)}}
+                  onClick={() => {
+                    scrollToTop();
+                    setPublicPage(p => p + 1)
+                  }}
                   disabled={publicPage === 2 || loading}
                   loading={loading}
               >
@@ -167,7 +175,10 @@ export function FeedView({ variant }: FeedViewProps) {
             <div className="flex items-center justify-center space-x-4 pt-4">
               <Button
                   variant="outline"
-                  onClick={() => {scrollToTop(); setFriendsPage(p => Math.max(0, p - 1))}}
+                  onClick={() => {
+                    scrollToTop();
+                    setFriendsPage(p => Math.max(0, p - 1))
+                  }}
                   disabled={friendsPage === 0 || loading}
               >
                 Previous
@@ -175,7 +186,10 @@ export function FeedView({ variant }: FeedViewProps) {
               <span className="text-text-muted">Page {friendsPage + 1}</span>
               <Button
                   variant="outline"
-                  onClick={() => {scrollToTop(); setFriendsPage(p => p + 1)}}
+                  onClick={() => {
+                    scrollToTop();
+                    setFriendsPage(p => p + 1)
+                  }}
                   disabled={!hasMore || loading}
                   loading={loading}
               >
@@ -189,7 +203,10 @@ export function FeedView({ variant }: FeedViewProps) {
             <div className="flex items-center justify-center space-x-4 pt-4">
               <Button
                   variant="outline"
-                  onClick={() => {scrollToTop(); setClosePage(p => Math.max(0, p - 1))}}
+                  onClick={() => {
+                    scrollToTop();
+                    setClosePage(p => Math.max(0, p - 1))
+                  }}
                   disabled={closePage === 0 || loading}
               >
                 Previous
@@ -197,7 +214,10 @@ export function FeedView({ variant }: FeedViewProps) {
               <span className="text-text-muted">Page {closePage + 1}</span>
               <Button
                   variant="outline"
-                  onClick={() => {scrollToTop(); setClosePage(p => p + 1)}}
+                  onClick={() => {
+                    scrollToTop();
+                    setClosePage(p => p + 1)
+                  }}
                   disabled={!hasMore || loading}
                   loading={loading}
               >

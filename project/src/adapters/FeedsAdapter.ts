@@ -126,32 +126,49 @@ export class FeedsAdapter {
     };
   }
 
-  // Back-compat helpers if you still want a session-based call in some places:
-  async getFriendsFeedFromSession(session: Session, friendsPage = 0): Promise<PairFeedsResponse> {
-    const ids = (session.followingList ?? []).map(s => s.trim()).filter(Boolean);
-    if (!ids.length) return { feeds: [[], []] };
-    return this.getFriendsFeed({ friendsIds: ids, friendsPage });
-  }
-
-  async getCloseFeedFromSession(session: Session, closePage = 0): Promise<PairFeedsResponse> {
-    const ids = (session.closeList ?? []).map(s => s.trim()).filter(Boolean);
-    if (!ids.length) return { feeds: [[], []] };
-    return this.getCloseFeed({ closeIds: ids, closePage });
-  }
-
   private mapFeedItem(item: any): Post {
     const uid = String(item.UserID ?? '');
     const [user] = uid.split('#');
+    const ts = Number(item.Timestamp ?? 0);
+    const postId = `${uid}#${ts}`;
+
+    // NEW: accept Comments/comments, normalize fields to your Comment interface
+    const rawComments = Array.isArray(item.Comments)
+        ? item.Comments
+        : Array.isArray(item.comments)
+            ? item.comments
+            : [];
+
+    const Comments = rawComments.map((c: any) => {
+      const author = String(c.UserID ?? c.userId ?? c.user ?? c.author ?? '');
+      const cts = Number(c.Timestamp ?? c.ts ?? c.time ?? 0);
+      const text = String(
+          c.Context ?? c.context ?? c.Txt ?? c.text ?? c.body ?? c.message ?? ''
+      );
+      const id = String(c.id ?? `${postId}#${cts || Date.now()}#${author || 'anon'}`);
+      return { id, postId, author, ts: cts, text };
+    });
+
+    // Return in your app’s existing shape (unchanged keys), just add Comments
     return {
-      id: `${uid}#${item.Timestamp}`,
-      user,
-      privacy: item.Privacy,
-      ts: item.Timestamp,
+      id: postId,                     // (already used by your UI keys)
+      user,                           // existing lowercase field your UI uses
+      privacy: item.Privacy,          // existing lowercase field your UI uses
+      ts,
       txt: item.Txt,
       tags: item.Tags,
       links: item.Links,
       History: item.History,
-    };
+
+      // Also keep original backend-style fields if other parts rely on them
+      UserID: uid,
+      Privacy: item.Privacy,
+      Timestamp: ts,
+      Txt: item.Txt,
+
+      // NEW field carrying normalized comments
+      Comments,
+    } as Post;
   }
 }
 

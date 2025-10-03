@@ -109,21 +109,80 @@ export const meetsAdapter = {
     }));
   },
 
-  async getSelf(UserID: string): Promise<MeetItem[]> {
-    const url = buildGetUrl('/activity/self', { UserID });
-    const data = await getJSON<{ count: number; items: any[] }>(url);
-    return (data.items ?? []).map((it) => ({
-      id: it.id,
-      title: it.title || it.ActivityType || 'My meet',
-      host: it.host || UserID,
-      when: Number(it.when ?? it.ValidUntill ?? Date.now()),
-      where: it.where ?? it.City ?? '—',
-      desc: it.desc ?? it.Description,
-      privacy: it.privacy ?? undefined,
-      going: it.going ?? 0,
-      max: it.max ?? undefined,
-    }));
-  },
+async getSelfPairs(UserID: string): Promise<any[]> {
+  const url = new URL(buildApiUrl('/activity/self-pairs'), window.location.origin);
+
+  const res = await fetch(url.toString(), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ UserID }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API Error ${res.status}: Failed to get self pairs: ${text || res.statusText}`);
+  }
+
+  const data = await res.json() as { pairs: any[] };
+  console.log('[DEBUG] Pairs from Lambda A:', data.pairs);
+
+  return data.pairs ?? [];
+},
+
+async getSelf(UserID: string): Promise<MeetItem[]> {
+
+  const pairs = await this.getSelfPairs(UserID);
+
+  if (!pairs || pairs.length === 0) {
+    console.log(`[DEBUG] No activities found for user ${UserID}`);
+    return [];
+  }
+
+  const sanitizedPairs = pairs
+    .map(p => {
+      if (Array.isArray(p) && p.length === 2) return [String(p[0]), Number(p[1])] as [string, number];
+      if (p.pk && p.sk) return [String(p.pk), Number(p.sk)] as [string, number];
+      console.warn('[WARN] Invalid pair format detected:', p);
+      return null;
+    })
+    .filter(Boolean);
+
+  if (sanitizedPairs.length === 0) {
+    console.warn('[WARN] No valid pairs to send to Lambda B');
+    return [];
+  }
+
+  console.log('[DEBUG] Pairs to send to Lambda B:', sanitizedPairs);
+
+  const url = new URL(buildApiUrl('/activity/self-result'), window.location.origin);
+
+  const res = await fetch(url.toString(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ pairs: sanitizedPairs }), // <-- keep key "pairs"
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`API Error ${res.status}: Failed to get activities from DB: ${text || res.statusText}`);
+  }
+
+  const data = await res.json() as { count: number; items: any[] };
+  console.log('[DEBUG] Data from Lambda B:', data);
+
+  return (data.items ?? []).map((it) => ({
+    id: it.id || `${it.ActivityType}-${it.ValidUntill}`,
+    title: it.title || it.ActivityType || 'My meet',
+    host: it.host || UserID,
+    when: Number(it.when ?? it.ValidUntill ?? Date.now()),
+    where: it.where ?? it.City ?? '—',
+    desc: it.desc ?? it.Description,
+    privacy: it.privacy ?? undefined,
+    going: it.going ?? 0,
+    max: it.max ?? undefined,
+  }));
+},
+
 
   async getMeets(params: GetMeetsParams): Promise<MeetItem[]> {
     const { filterType, type, validUntil, city, username } = params;

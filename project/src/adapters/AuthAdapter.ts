@@ -1,14 +1,70 @@
 import { buildApiUrl } from '../config';
 import type { Session } from '../types';
 
+const STORAGE_KEY = 'dialife.session.v1';
+
 export class AuthAdapter {
     private session: Session | null = null;
+
+    constructor() {
+        // Hydrate from storage on page load
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (raw) {
+                const parsed = JSON.parse(raw);
+                // normalize once more to be safe
+                this.session = {
+                    userId: String(parsed.userId),
+                    username: String(parsed.username),
+                    displayName: String(parsed.displayName ?? parsed.username),
+                    avatar: parsed.avatar ?? null,
+                    followingList: Array.isArray(parsed.followingList) ? parsed.followingList.map(String) : [],
+                    closeList: Array.isArray(parsed.closeList) ? parsed.closeList.map(String) : [],
+                };
+            }
+        } catch { /* ignore corrupt storage */ }
+
+        // Keep multiple tabs in sync
+        window.addEventListener('storage', (e) => {
+            if (e.key === STORAGE_KEY) {
+                if (e.newValue) {
+                    try {
+                        const parsed = JSON.parse(e.newValue);
+                        this.session = {
+                            userId: String(parsed.userId),
+                            username: String(parsed.username),
+                            displayName: String(parsed.displayName ?? parsed.username),
+                            avatar: parsed.avatar ?? null,
+                            followingList: Array.isArray(parsed.followingList) ? parsed.followingList.map(String) : [],
+                            closeList: Array.isArray(parsed.closeList) ? parsed.closeList.map(String) : [],
+                        };
+                    } catch {
+                        this.session = null;
+                    }
+                } else {
+                    this.session = null;
+                }
+            }
+        });
+    }
+
+    private persist(session: Session | null) {
+        this.session = session;
+        if (session) {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+            } catch { /* quota/full private mode */ }
+        } else {
+            localStorage.removeItem(STORAGE_KEY);
+        }
+    }
 
     async signInWithPassword(username: string, password: string): Promise<Session> {
         const res = await fetch(buildApiUrl('auth'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ username, password }),
+            credentials: 'include', // harmless if you later switch to cookies
         });
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -18,7 +74,6 @@ export class AuthAdapter {
         // Backend returns: { userId, username, displayName, avatar, followingList, closeList }
         const raw = await res.json();
 
-        // 🔒 normalize so the rest of the app can trust arrays
         const session: Session = {
             userId: String(raw.userId),
             username: String(raw.username),
@@ -28,12 +83,10 @@ export class AuthAdapter {
             closeList: Array.isArray(raw.closeList) ? raw.closeList.map(String) : [],
         };
 
-
-        this.session = session;
+        this.persist(session);
         return session;
     }
 
-    // ... keep the rest as-is
     async signUp(input: { username: string; password: string; name?: string; surname?: string; profile_pic?: string }) {
         const payload = {
             username: input.username,
@@ -92,7 +145,7 @@ export class AuthAdapter {
     }
 
     signOut(): void {
-        this.session = null;
+        this.persist(null);
     }
 }
 

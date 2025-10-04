@@ -327,6 +327,29 @@ async getSelf(UserID: string): Promise<MeetItem[]> {
       Finished:     /* (!) true/false, default false */ false,                         // (!)
     };
   },
+
+  // Add this to your meetsAdapter object
+  async joinActivity(activityType: string, validUntil: number): Promise<void> {
+    const url = new URL(buildApiUrl('/activity/join'), window.location.origin);
+    const res = await fetch(url.toString(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({
+        ActivityType: activityType,
+        ValidUntill: validUntil
+      }),
+    });
+    
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`API Error ${res.status}: Failed to join activity: ${text || res.statusText}`);
+    }
+
+    // Simay
+    
+    return res.json();
+  },
+
 };
 
 const FILTER_ICONS = (iconSize: number) => ({
@@ -390,6 +413,34 @@ export function MeetsPage() {
     loadTypeOptions();
     loadMeets();
   }, [filterType, applied]);
+
+  const handleJoin = async (meet: MeetItem) => {
+    try {
+      // Extract the activity type from meet data
+      // Assuming meet.title contains the activity type, adjust if needed
+      const activityType = meet.title || '';
+      const validUntil = meet.when;
+      
+      await meetsAdapter.joinActivity(activityType, validUntil);
+      showToast('Successfully joined activity!', 'success');
+      
+      // Update local state to reflect the join
+      setMeets(prev =>
+        prev.map(m => {
+          if (m.id === meet.id) {
+            return {
+              ...m,
+              going: m.going + 1
+            };
+          }
+          return m;
+        })
+      );
+    } catch (error) {
+      showToast('Failed to join activity', 'error');
+      console.error('Join error:', error);
+    }
+  };
 
   const handleRSVP = async (meetId: string, currentlyGoing: boolean) => {
     try {
@@ -657,7 +708,18 @@ export function MeetsPage() {
                         <Button
                           size="sm"
                           variant={hasRSVP ? 'outline' : 'primary'}
-                          onClick={() => handleRSVP(meet.id, hasRSVP)}
+                          onClick={() => {
+                            // Use handleJoin for new join functionality, handleRSVP for existing RSVP
+                            if (!hasRSVP && !isFull) {
+                              // Find the meet object to get activity type and validUntil
+                              const currentMeet = meets.find(m => m.id === meet.id);
+                              if (currentMeet) {
+                                handleJoin(currentMeet);
+                              }
+                            } else {
+                              handleRSVP(meet.id, hasRSVP);
+                            }
+                          }}
                           disabled={!hasRSVP && isFull}
                           className={clsx(
                             'flex items-center space-x-1',

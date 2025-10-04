@@ -8,6 +8,7 @@ export interface Post {
   tags?: string[];
   links?: string[];
   History?: number[];
+  id: string;
 }
 
 export type Session = {

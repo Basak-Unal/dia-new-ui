@@ -8,6 +8,7 @@ type AppCtx = {
   setSession: (s: Session | null) => void;
   showToast: (msg: string, kind?: ToastKind) => void;
   signOut: () => void;
+  language: string;
 };
 
 const Ctx = createContext<AppCtx | undefined>(undefined);
@@ -29,7 +30,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     try {
       if (s) localStorage.setItem('session', JSON.stringify(s));
       else localStorage.removeItem('session');
-    } catch {}
+    } catch {throw Error}
   };
 
   const showToast = (msg: string, kind: ToastKind = 'info') => {
@@ -38,12 +39,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   };
 
   const signOut = () => {
-    try { localStorage.removeItem('session'); } catch {}
+    try { localStorage.removeItem('session'); } catch {throw Error}
     setSessionState(null);
   };
 
+  const language = 'en';
+
   return (
-      <Ctx.Provider value={{ session, setSession, showToast, signOut }}>
+      <Ctx.Provider value={{ session, setSession, showToast, signOut, language}}>
         {children}
       </Ctx.Provider>
   );

@@ -53,13 +53,12 @@ export default function ProfilePage() {
         if (!res.ok) throw new Error(`API ${res.status}`);
 
         const data = await res.json();
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const mapped: Post[] = (data || []).map((row: any) => {
           const username = String(row.UserID).split("#")[0];
           const privacyNum = Number(String(row.UserID).split("#")[1]) || 0;
           const tsNum = Number(row.Timestamp);
           return {
-            // if your Post type also has an id, keep it; otherwise remove this key field from PostCard
-            // @ts-ignore (only if Post doesn't declare id)
             id: `${row.UserID}:${row.Timestamp}`,
             UserID: String(row.UserID),
             user: username,
@@ -69,12 +68,13 @@ export default function ProfilePage() {
             tags: row.tags ?? row.Tags ?? undefined,
             links: row.links ?? undefined,
             History: Array.isArray(row.History)
-              ? row.History.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n))
+              ? row.History.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
               : undefined,
           };
         });
 
         if (alive) setPosts(mapped);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } catch (e: any) {
         if (alive) {
           setPostErr(e?.message || "Failed to load posts");
@@ -228,7 +228,6 @@ export default function ProfilePage() {
 function TabContent({
   tab,
   posts,
-  postErr,
   followers,
   following,
   profileUsername,

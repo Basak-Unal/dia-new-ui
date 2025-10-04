@@ -19,7 +19,7 @@ const navigation = [
   { name: 'Close Friends',href: '/close',     icon: StarIcon },
   { name: 'Private',      href: '/private',   icon: LockClosedIcon },
   { name: 'Activities',   href: '/activities',icon: BellIcon },
-  { name: 'Meets',        href: '/meets',     icon: CalendarIcon },
+  { name: 'Events',        href: '/meets',     icon: CalendarIcon },
 ];
 
 export function AppShell() {

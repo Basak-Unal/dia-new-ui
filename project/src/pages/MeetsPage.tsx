@@ -13,7 +13,7 @@ import { buildApiUrl } from '../config';
 import { buildGetUrl } from '../utils/http';
 
 
-import { 
+import {
   CalendarIcon,
   MapPinIcon,
   UserGroupIcon,
@@ -319,7 +319,7 @@ async getSelf(UserID: string): Promise<MeetItem[]> {
     desc?: string;
   }) {
     return {
-      ActivityType: /* (!) choose your mapping e.g. */ form.title || 'meetup',        // (!)
+      ActivityType: /* (!) choose your mapping e.g. */ form.title || 'event',        // (!)
       ValidUntill:  new Date(form.when).getTime(),                                     // (!) or endOfDayEpochMsFromDateInput(form.when.split('T')[0])
       City:         /* (!) e.g. */ form.where,                                         // (!)
       Description:  /* (!) e.g. */ (form.desc ?? ''),                                  // (!)
@@ -417,13 +417,13 @@ export function MeetsPage() {
   };
 
   if (loading) {
-    return <Loading text="Loading meetups..." />;
+    return <Loading text="Loading events..." />;
   }
 
   if (error) {
     return (
       <ErrorState
-        title="Failed to load meetups"
+        title="Failed to load events"
         message={error}
         onRetry={loadMeets}
       />
@@ -533,7 +533,7 @@ export function MeetsPage() {
       <main className="flex-1 p-4">
         <div className="mb-6 flex items-center justify-between">
           <div>
-            <h2 className="text-2xl font-bold text-text mb-2">Meetups</h2>
+            <h2 className="text-2xl font-bold text-text mb-2">Events</h2>
             <p className="text-text-muted">Discover and join local events</p>
           </div>
           <Button
@@ -541,7 +541,7 @@ export function MeetsPage() {
             className="flex items-center space-x-2"
           >
             <PlusIcon className="w-4 h-4" />
-            <span>Create Meet</span>
+            <span>Create Event</span>
           </Button>
         </div>
 
@@ -552,7 +552,7 @@ export function MeetsPage() {
             onSuccess={() => {
               setShowCreateForm(false);
               loadMeets();
-              showToast('Meetup created!', 'success');
+              showToast('Event created!', 'success');
             }}
             onCancel={() => setShowCreateForm(false)}
           />
@@ -561,10 +561,10 @@ export function MeetsPage() {
         {meets.length === 0 ? (
           <EmptyState
             icon={<CalendarIcon />}
-            title="No meetups found"
-            description={`No ${filterType} meetups to show right now.`}
+            title="No events found"
+            description={`No ${filterType} events to show right now.`}
             action={{
-              label: 'Create Meetup',
+              label: 'Create Event',
               onClick: () => setShowCreateForm(true)
             }}
           />
@@ -745,7 +745,7 @@ function CreateMeetForm({ onSuccess, onCancel, typeOptions = [] }: CreateMeetFor
       await meetsAdapter.putActivity(activityPayload);
       onSuccess();
     } catch (error) {
-      console.error('Failed to create meetup:', error);
+      console.error('Failed to create event:', error);
     } finally {
       setLoading(false);
     }
@@ -753,7 +753,7 @@ function CreateMeetForm({ onSuccess, onCancel, typeOptions = [] }: CreateMeetFor
 
   return (
     <div className="bg-card rounded-2xl border border-border p-6 mb-6">
-      <h3 className="text-lg font-semibold text-text mb-4">Create New Meetup</h3>
+      <h3 className="text-lg font-semibold text-text mb-4">Create New Event</h3>
 
       <form onSubmit={handleSubmit} className="space-y-4">
         {/* Type (dropdown) */}
@@ -871,7 +871,7 @@ function CreateMeetForm({ onSuccess, onCancel, typeOptions = [] }: CreateMeetFor
             loading={loading}
             disabled={!formData.type || !formData.when || !formData.where} // <-- use type
           >
-            Create Meetup
+            Create Event
           </Button>
         </div>
       </form>

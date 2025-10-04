@@ -253,18 +253,64 @@ async getSelf(UserID: string): Promise<MeetItem[]> {
 
   hasRSVP(_meetId: string): boolean { return false; },
 
-  async putActivity(params: {
-    // (!) Put your final values into these fields before calling:
-    ActivityType: string;      // (!)
-    ValidUntill: number;       // (!) epoch ms
-    City: string;              // (!)
-    Description: string;       // (!)
-    Signed: boolean;           // (!)
-    Finished: boolean;         // (!)
+    async putActivity(params: {
+    ActivityType: string;
+    ValidUntill: number;
+    City: string;
+    Description: string;
+    Signed: boolean;
+    Finished: boolean;
     Host: string;
-  }): Promise<{ id?: string }> {
-    return putJSON<{ id?: string }>('/activity/put', params);
+  }): Promise<{ id?: string; postgresOk?: boolean; postgresError?: string | null }> {
+
+    // 1) Keep existing Dynamo behavior (this will throw if it fails)
+    const dynamoResult = await putJSON<{ id?: string }>('/activity/put', params);
+
+    // 2) Fire-and-try-to-retry for Postgres Lambda at /activity/postgres
+    // Use the same payload. We'll try up to N times with exponential backoff.
+    const postgresUrl = new URL(buildApiUrl('/activity'), window.location.origin).toString();
+
+    async function postWithRetry(body: any, retries = 3, delayMs = 500): Promise<{ ok: boolean; error?: string }> {
+      let lastError: string | undefined;
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          const res = await fetch(postgresUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            lastError = `Status ${res.status}: ${text || res.statusText}`;
+            // If client error (4xx), don't retry
+            if (res.status >= 400 && res.status < 500) break;
+            // otherwise fall-through to retry
+          } else {
+            return { ok: true };
+          }
+        } catch (err: any) {
+          lastError = (err && err.message) ? err.message : String(err);
+        }
+        // If we'll retry, wait
+        if (attempt < retries) {
+          await new Promise(r => setTimeout(r, delayMs * Math.pow(2, attempt))); // exponential backoff
+        }
+      }
+      return { ok: false, error: lastError ?? 'Unknown error' };
+    }
+
+    const pgResult = await postWithRetry(params, 3, 400);
+
+    if (!pgResult.ok) {
+      // Log to console (frontend). You may also want to send to Sentry or show a non-blocking toast.
+      console.warn('[WARN] Postgres write failed for /activity:', pgResult.error);
+      // Return both the dynamo id and the failed postgres signal
+      return { id: dynamoResult?.id, postgresOk: false, postgresError: pgResult.error };
+    }
+
+    return { id: dynamoResult?.id, postgresOk: true, postgresError: null };
   },
+
 
    buildActivityFromForm(form: {
     title: string;

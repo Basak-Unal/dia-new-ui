@@ -18,7 +18,6 @@ const navigation = [
   { name: 'Following',    href: '/following', icon: UserGroupIcon },
   { name: 'Close Friends',href: '/close',     icon: StarIcon },
   { name: 'Private',      href: '/private',   icon: LockClosedIcon },
-  { name: 'Activities',   href: '/activities',icon: BellIcon },
   { name: 'Events',        href: '/meets',     icon: CalendarIcon },
 ];
 

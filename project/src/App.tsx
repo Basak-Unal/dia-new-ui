@@ -5,7 +5,6 @@ import {HomePage} from './pages/HomePage';
 import {FollowingPage} from './pages/FollowingPage';
 import {ClosePage} from './pages/ClosePage';
 import {PrivatePage} from './pages/PrivatePage';
-import {ActivitiesPage} from './pages/ActivitiesPage';
 import {MeetsPage} from './pages/MeetsPage';
 import {PostPage} from './pages/PostPage';
 import ProfilePage from './pages/ProfilePage';
@@ -40,7 +39,6 @@ function App() {
                         <Route path="following" element={<FollowingPage/>}/>
                         <Route path="close" element={<ClosePage/>}/>
                         <Route path="private" element={<PrivatePage/>}/>
-                        <Route path="activities" element={<ActivitiesPage/>}/>
                         <Route path="meets" element={<MeetsPage/>}/>
                         <Route path="post" element={<PostPage/>}/>
                         <Route path="profile/:user" element={<ProfilePage/>}/>

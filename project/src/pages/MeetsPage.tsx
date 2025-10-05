@@ -173,12 +173,12 @@ async getSelf(UserID: string): Promise<MeetItem[]> {
   return (data.items ?? []).map((it) => ({
     id: it.id || `${it.ActivityType}-${it.ValidUntill}`,
     title: it.title || it.ActivityType || 'My meet',
-    host: it.host || UserID,
+    host: it.host ?? it.Host ?? '—',
     when: Number(it.when ?? it.ValidUntill ?? Date.now()),
     where: it.where ?? it.City ?? '—',
     desc: it.desc ?? it.Description,
     privacy: it.privacy ?? undefined,
-    going: it.going ?? 0,
+    going: it.Going ?? it.going ?? 0,
     max: it.max ?? undefined,
   }));
 },
@@ -329,7 +329,7 @@ async getSelf(UserID: string): Promise<MeetItem[]> {
   },
 
   // Add this to your meetsAdapter object
-  async joinActivity(activityType: string, validUntil: number): Promise<void> {
+  async joinActivity(activityType: string, validUntil: number, username: string): Promise<void> {
     const url = new URL(buildApiUrl('/activity/join'), window.location.origin);
     const res = await fetch(url.toString(), {
       method: 'POST',
@@ -346,6 +346,33 @@ async getSelf(UserID: string): Promise<MeetItem[]> {
     }
 
     // Simay
+    try {
+      const postgresUrl = new URL(buildApiUrl('/activity'), window.location.origin);
+      const body = {
+        ActivityType: activityType,
+        ValidUntill: validUntil,
+        Host: username || 'unknown',  // 🔹 add Host since Postgres Lambda expects it
+      };
+
+      const pgRes = await fetch(postgresUrl.toString(), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+        },
+        body: JSON.stringify(body),
+      });
+
+      if (!pgRes.ok) {
+        const text = await pgRes.text().catch(() => '');
+        console.warn(`[WARN] Postgres write failed for /activity/post: Status ${pgRes.status}: ${text || pgRes.statusText}`);
+      } else {
+        console.log('[DEBUG] Postgres write success for /activity/post');
+      }
+
+    } catch (err: any) {
+      console.warn('[WARN] Postgres call error:', err.message || err);
+    }
     
     return res.json();
   },
@@ -421,7 +448,7 @@ export function MeetsPage() {
       const activityType = meet.title || '';
       const validUntil = meet.when;
       
-      await meetsAdapter.joinActivity(activityType, validUntil);
+      await meetsAdapter.joinActivity(activityType, validUntil, username);
       showToast('Successfully joined activity!', 'success');
       
       // Update local state to reflect the join

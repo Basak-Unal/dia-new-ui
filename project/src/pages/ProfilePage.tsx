@@ -34,7 +34,18 @@ export default function ProfilePage() {
   const [followers, setFollowers] = useState<string[]>([]);
   const [following, setFollowing] = useState<string[]>([]);
 
-  const tabs: { id: TabType; label: string; icon: React.FC<React.SVGProps<SVGSVGElement>> }[] = [
+  // ✅ NEW: profileInfo state
+  const [profileInfo, setProfileInfo] = useState({
+    name: "",
+    surname: "",
+    bio: "",
+  });
+
+  const tabs: {
+    id: TabType;
+    label: string;
+    icon: React.FC<React.SVGProps<SVGSVGElement>>;
+  }[] = [
     { id: "posts", label: "Posts", icon: DocumentTextIcon },
     { id: "followers", label: "Followers", icon: UserGroupIcon },
     { id: "following", label: "Following", icon: UserGroupIcon },
@@ -68,7 +79,9 @@ export default function ProfilePage() {
             tags: row.tags ?? row.Tags ?? undefined,
             links: row.links ?? undefined,
             History: Array.isArray(row.History)
-              ? row.History.map((n: unknown) => Number(n)).filter((n: number) => Number.isFinite(n))
+              ? row.History.map((n: unknown) => Number(n)).filter((n: number) =>
+                  Number.isFinite(n)
+                )
               : undefined,
           };
         });
@@ -106,6 +119,33 @@ export default function ProfilePage() {
     return () => {
       alive = false;
     };
+  }, [profileUsername]);
+
+  // ✅ NEW: Fetch profile info
+  useEffect(() => {
+    const fetchProfileInfo = async () => {
+      try {
+        const url = buildApiUrl(`users?username=${profileUsername}`);
+        const res = await fetch(url);
+        const data = await res.json();
+
+        if (!res.ok || data.message) {
+          showToast(data.message || "Failed to load profile info", "error");
+          return;
+        }
+
+        setProfileInfo({
+          name: data.name || "",
+          surname: data.surname || "",
+          bio: data.bio || "",
+        });
+      } catch (err) {
+        console.error("Failed to fetch profile info:", err);
+        showToast("Failed to load profile info", "error");
+      }
+    };
+
+    fetchProfileInfo();
   }, [profileUsername]);
 
   const handleFollowToggle = async () => {
@@ -149,11 +189,15 @@ export default function ProfilePage() {
           </div>
 
           <div className="flex-1 min-w-0">
-            <h1 className="text-2xl font-bold text-text mb-1">{profileUsername}</h1>
+            <h1 className="text-2xl font-bold text-text mb-1">
+              {profileUsername}
+            </h1>
             <p className="text-text-muted mb-3">@{profileUsername}</p>
             <div className="flex items-center space-x-6 text-sm">
               <div>
-                <span className="font-semibold text-text">{posts?.length || 0}</span>
+                <span className="font-semibold text-text">
+                  {posts?.length || 0}
+                </span>
                 <span className="text-text-muted ml-1">Posts</span>
               </div>
               <div>
@@ -161,7 +205,9 @@ export default function ProfilePage() {
                 <span className="text-text-muted ml-1">Followers</span>
               </div>
               <div>
-                <span className="font-semibold text-text">{following.length}</span>
+                <span className="font-semibold text-text">
+                  {following.length}
+                </span>
                 <span className="text-text-muted ml-1">Following</span>
               </div>
             </div>
@@ -169,7 +215,10 @@ export default function ProfilePage() {
 
           <div className="flex-shrink-0">
             {isOwnProfile ? (
-              <Link to={`/settings`} className="inline-flex items-center px-4 py-2 border rounded-lg">
+              <Link
+                to={`/settings`}
+                className="inline-flex items-center px-4 py-2 border rounded-lg"
+              >
                 <PencilIcon className="w-4 h-4" />
                 <span>Edit Profile</span>
               </Link>
@@ -218,6 +267,7 @@ export default function ProfilePage() {
             setFollowers={setFollowers}
             setFollowing={setFollowing}
             setFollowerCount={setFollowerCount}
+            profileInfo={profileInfo} // ✅ added
           />
         </div>
       </div>
@@ -225,6 +275,8 @@ export default function ProfilePage() {
   );
 }
 
+// --------------------------------------------------
+// ✅ TabContent Component (with "About" section updated)
 function TabContent({
   tab,
   posts,
@@ -234,6 +286,7 @@ function TabContent({
   setFollowers,
   setFollowing,
   setFollowerCount,
+  profileInfo, // ✅ added
 }: {
   tab: TabType;
   posts: Post[] | null;
@@ -244,6 +297,7 @@ function TabContent({
   setFollowers: React.Dispatch<React.SetStateAction<string[]>>;
   setFollowing: React.Dispatch<React.SetStateAction<string[]>>;
   setFollowerCount: React.Dispatch<React.SetStateAction<number>>;
+  profileInfo: { name: string; surname: string; bio: string }; // ✅ added
 }) {
   const { session, showToast } = useApp();
 
@@ -302,7 +356,9 @@ function TabContent({
             variant={isFollowingAlready ? "outline" : "primary"}
             disabled={tabType === "followers" && isFollowingAlready}
             className={clsx(
-              tabType === "followers" && isFollowingAlready && "opacity-50 cursor-not-allowed"
+              tabType === "followers" &&
+                isFollowingAlready &&
+                "opacity-50 cursor-not-allowed"
             )}
             onClick={() =>
               handleTabFollowToggle(session!.username, username, isFollowingAlready)
@@ -363,8 +419,27 @@ function TabContent({
     );
   }
 
+  // ✅ Updated "About" tab
   if (tab === "about") {
-    return <div>About content here...</div>;
+    return (
+      <div className="space-y-4">
+        <div>
+          <h3 className="text-lg font-semibold text-text mb-1">Name</h3>
+          <p className="text-text-muted">
+            {profileInfo.name
+              ? `${profileInfo.name} ${profileInfo.surname}`
+              : "No name provided"}
+          </p>
+        </div>
+
+        <div>
+          <h3 className="text-lg font-semibold text-text mb-1">Bio</h3>
+          <p className="text-text-muted">
+            {profileInfo.bio || "This user hasn't added a bio yet."}
+          </p>
+        </div>
+      </div>
+    );
   }
 
   return null;

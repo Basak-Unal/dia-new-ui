@@ -1,0 +1,265 @@
+# add_friends.py
+import json
+import os
+import base64
+import psycopg2
+import psycopg2.extras as pgx
+
+def _resp(status, body):
+    return {
+        "statusCode": status,
+        "headers": {
+            "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "*"),
+            "Access-Control-Allow-Methods": "POST,OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Content-Type": "application/json",
+        },
+        "body": json.dumps(body, default=str),
+    }
+
+def _get_json_body(event):
+    b = event.get("body")
+    if b and event.get("isBase64Encoded"):
+        try:
+            b = base64.b64decode(b).decode("utf-8", errors="ignore")
+        except Exception:
+            b = ""
+    try:
+        return json.loads(b) if b else {}
+    except Exception:
+        return {}
+
+def _get_first(d, *keys):
+    if not isinstance(d, dict):
+        return ""
+    for k in keys:
+        v = d.get(k)
+        if v is not None and str(v).strip() != "":
+            return str(v).strip()
+    return ""
+
+def _as_list(v):
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return v
+    if isinstance(v, str):
+        try:
+            j = json.loads(v)
+            if isinstance(j, list):
+                return j
+        except Exception:
+            return []
+    try:
+        return list(v)
+    except Exception:
+        return []
+
+def lambda_handler(event, context):
+    method = (
+        (event.get("requestContext", {}).get("http", {}) or {}).get("method", "")
+        or event.get("httpMethod", "")
+    ).upper()
+
+    if method == "OPTIONS":
+        return _resp(200, {"ok": True})
+
+    try:
+        body = _get_json_body(event)
+        qs   = event.get("queryStringParameters") or {}
+        hdrs = { (k or "").lower(): v for k, v in (event.get("headers") or {}).items() }
+
+        current_username = (
+            _get_first(body, "current_username", "session_username", "username")
+            or _get_first(qs, "current_username", "session_username", "username")
+            or (hdrs.get("x-session-username") or "").strip()
+            or _get_first(event, "current_username", "session_username", "username")
+        )
+
+        target_username = (
+            _get_first(body, "target_username", "friend_username")
+            or _get_first(qs, "target_username", "friend_username")
+            or _get_first(event, "target_username", "friend_username")
+        )
+
+        # relation: "friend" or "close"; also accept index: 0 (friend) / 1 (close)
+        rel_raw = (
+            _get_first(body, "relation")
+            or _get_first(qs, "relation")
+            or _get_first(event, "relation")
+            or ""
+        ).lower()
+
+        idx_raw = (
+            _get_first(body, "index")
+            or _get_first(qs, "index")
+            or _get_first(event, "index")
+            or ""
+        )
+
+        relation = None
+        if rel_raw in ("friend", "friends", "follow"):
+            relation = "friend"
+        elif rel_raw in ("close", "closefriend", "close_friend", "closefriends"):
+            relation = "close"
+        else:
+            try:
+                relation = "close" if int(idx_raw) == 1 else "friend"
+            except Exception:
+                relation = "friend"
+
+        if not current_username or not target_username:
+            return _resp(400, {
+                "error": "current_username and target_username are required",
+                "got": {
+                    "current_username": bool(current_username),
+                    "target_username": bool(target_username)
+                }
+            })
+
+        if current_username == target_username:
+            return _resp(400, {"error": "You cannot follow yourself"})
+
+        conn = psycopg2.connect(
+            host=os.environ["DB_HOST"],
+            dbname=os.environ["DB_NAME"],
+            user=os.environ["DB_USER"],
+            password=os.environ["DB_PASSWORD"],
+            port=os.environ["DB_PORT"],
+        )
+        conn.autocommit = False
+        cur = conn.cursor(cursor_factory=pgx.RealDictCursor)
+
+        # Ensure close_friends column exists (safe, idempotent)
+        cur.execute('ALTER TABLE "User" ADD COLUMN IF NOT EXISTS close_friends jsonb DEFAULT \'[]\'::jsonb')
+
+        # Lock both rows to avoid races
+        cur.execute(
+            'SELECT username, followers, following, close_friends FROM "User" WHERE username IN (%s, %s) FOR UPDATE',
+            (current_username, target_username),
+        )
+        rows = { r["username"]: r for r in cur.fetchall() }
+        me = rows.get(current_username)
+        target = rows.get(target_username)
+
+        if not me:
+            conn.rollback()
+            return _resp(404, {"error": "Session user not found", "exists": False})
+        if not target:
+            conn.rollback()
+            return _resp(404, {"error": "Target user not found", "exists": False})
+
+        me_following = set(_as_list(me.get("following")))
+        me_close     = set(_as_list(me.get("close_friends")))
+        tgt_followers = set(_as_list(target.get("followers")))
+
+        if relation == "friend":
+            if target_username in me_following:
+                conn.rollback()
+                return _resp(409, {
+                    "ok": False,
+                    "error": "already_following",
+                    "message": f"You already follow {target_username}",
+                    "relationship": "friend",
+                    "current_user": current_username,
+                    "target_user": target_username
+                })
+
+            me_following.add(target_username)
+            tgt_followers.add(current_username)
+
+            cur.execute(
+                'UPDATE "User" SET following = %s WHERE username = %s',
+                (pgx.Json(sorted(me_following)), current_username),
+            )
+            cur.execute(
+                'UPDATE "User" SET followers = %s WHERE username = %s',
+                (pgx.Json(sorted(tgt_followers)), target_username),
+            )
+            conn.commit()
+
+            cur.close()
+            conn.close()
+            return _resp(200, {
+                "ok": True,
+                "relationship": "friend",
+                "current_user": current_username,
+                "target_user": target_username,
+            })
+
+        # relation == "close"  → ensure follow, then add to close_friends
+        if target_username in me_close:
+            # Already a close friend (we could also ensure follow here if needed)
+            if target_username not in me_following:
+                me_following.add(target_username)
+                tgt_followers.add(current_username)
+                cur.execute(
+                    'UPDATE "User" SET following = %s WHERE username = %s',
+                    (pgx.Json(sorted(me_following)), current_username),
+                )
+                cur.execute(
+                    'UPDATE "User" SET followers = %s WHERE username = %s',
+                    (pgx.Json(sorted(tgt_followers)), target_username),
+                )
+                conn.commit()
+                cur.close()
+                conn.close()
+                return _resp(200, {
+                    "ok": True,
+                    "relationship": "close_friend",
+                    "note": "already_close_friend; follow ensured",
+                    "current_user": current_username,
+                    "target_user": target_username,
+                })
+            conn.rollback()
+            return _resp(409, {
+                "ok": False,
+                "error": "already_close_friend",
+                "message": f"{target_username} is already in your close friends",
+                "relationship": "close_friend",
+                "current_user": current_username,
+                "target_user": target_username
+            })
+
+        # Ensure follow first if missing
+        if target_username not in me_following:
+            me_following.add(target_username)
+            tgt_followers.add(current_username)
+            cur.execute(
+                'UPDATE "User" SET following = %s WHERE username = %s',
+                (pgx.Json(sorted(me_following)), current_username),
+            )
+            cur.execute(
+                'UPDATE "User" SET followers = %s WHERE username = %s',
+                (pgx.Json(sorted(tgt_followers)), target_username),
+            )
+
+        # Add to close_friends
+        me_close.add(target_username)
+        cur.execute(
+            'UPDATE "User" SET close_friends = %s WHERE username = %s',
+            (pgx.Json(sorted(me_close)), current_username),
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return _resp(200, {
+            "ok": True,
+            "relationship": "close_friend",
+            "current_user": current_username,
+            "target_user": target_username,
+        })
+
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        try:
+            cur.close()
+            conn.close()
+        except Exception:
+            pass
+        return _resp(500, {"error": str(e)})

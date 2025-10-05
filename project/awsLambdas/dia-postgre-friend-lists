@@ -1,0 +1,118 @@
+import os
+import json
+import psycopg2
+import psycopg2.extras
+
+def _connect():
+    return psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        port=int(os.environ.get("DB_PORT", 5432)),
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        connect_timeout=5
+    )
+
+def lambda_handler(event, context):
+    print("EVENT:", event)  # Debug incoming event
+
+    try:
+        # Parse incoming body
+        if isinstance(event, dict) and "body" in event and isinstance(event["body"], str):
+            try:
+                payload = json.loads(event["body"] or "{}")
+            except Exception:
+                payload = {}
+        else:
+            payload = event or {}
+
+        print("PAYLOAD:", payload)
+
+        username = payload.get("username")
+        list_type = payload.get("list_type")
+
+        if username is None or list_type not in [0, 1]:
+            return _resp(400, {"error": "username and valid list_type (0 or 1) required"})
+
+        conn = _connect()
+        try:
+            with conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+
+                    if list_type == 0:
+                        # Your own "following" list (unchanged)
+                        cur.execute("""
+                            SELECT following, last_idx
+                            FROM "User"
+                            WHERE LOWER(username) = LOWER(%s)
+                        """, (username,))
+                        row = cur.fetchone()
+                        if not row:
+                            return _resp(404, {"error": "user not found"})
+
+                        user_list = parse_jsonb_array(row.get("following"))
+                        last_index = row.get("last_idx", 0)
+
+                        return _resp(200, {
+                            "username": username,
+                            "list_type": 0,
+                            "user_list": user_list,
+                            "last_index": last_index,
+                            "source": "following"
+                        })
+
+                    # list_type == 1:
+                    # Inverse of close_friends: who has *me* in their close_friends
+                    # Safe even if close_friends is NULL.
+                    cur.execute("""
+                        SELECT username
+                        FROM "User"
+                        WHERE EXISTS (
+                            SELECT 1
+                            FROM jsonb_array_elements_text(COALESCE(close_friends, '[]'::jsonb)) AS cf(val)
+                            WHERE LOWER(cf.val) = LOWER(%s)
+                        )
+                        ORDER BY LOWER(username)
+                    """, (username,))
+                    rows = cur.fetchall()
+                    user_list = [r["username"] for r in rows]
+
+                    return _resp(200, {
+                        "username": username,
+                        "list_type": 1,
+                        "user_list": user_list,
+                        "last_index": 0,  # not meaningful for inverse view; kept for compatibility
+                        "source": "inverse_close_friends"
+                    })
+
+        finally:
+            conn.close()
+
+    except Exception as e:
+        print("ERROR:", str(e))
+        return _resp(500, {"error": str(e)})
+
+
+def parse_jsonb_array(value):
+    """
+    Safely parse a JSONB array from PostgreSQL.
+    Works if value is already a list or a JSON string.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except Exception as e:
+        print("JSONB parse error:", e)
+        return []
+
+
+def _resp(status, body):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(body, default=str),
+    }

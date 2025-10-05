@@ -1,0 +1,193 @@
+import json
+import os
+import time
+from decimal import Decimal
+from typing import List, Tuple, Any, Dict
+
+import boto3
+import psycopg2
+import psycopg2.extras
+
+# ---------- Dynamo config ----------
+DDB = boto3.client("dynamodb")
+TABLE_NAME = os.environ.get("TABLE_NAME", "dialife-activity")
+ATTR_PK_NAME = os.environ.get("ATTR_PK_NAME", "ActivityType")
+ATTR_SK_NAME = os.environ.get("ATTR_SK_NAME", "ValidUntill")
+
+# ---------- Postgres config ----------
+PG_HOST = os.environ.get("PG_HOST")
+PG_PORT = int(os.environ.get("PG_PORT", "5432"))
+PG_DB = os.environ.get("PG_DATABASE")
+PG_USER = os.environ.get("PG_USER")
+PG_PASS = os.environ.get("PG_PASSWORD")
+
+PG_TABLE = os.environ.get("PG_TABLE", "User")
+PG_USER_COL = os.environ.get("PG_USER_COL", "username")
+PG_EVENTS_COL = os.environ.get("PG_EVENTS_COL", "events_applied")
+
+MAX_KEYS = int(os.environ.get("MAX_KEYS", "500"))
+
+# ------------------ Helpers ------------------------
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "OPTIONS,POST",
+    }
+
+def json_default(o):
+    if isinstance(o, Decimal):
+        return int(o) if o % 1 == 0 else float(o)
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+def response(status: int, body: Dict):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json", **cors_headers()},
+        "body": json.dumps(body, default=json_default),
+    }
+
+def to_attr_val(v, is_sort_key=False):
+    """Minimal marshaler for PK/SK (assumed strings or numbers)."""
+    if isinstance(v, bool):
+        return {"BOOL": v}
+    if isinstance(v, (int, float, Decimal)):
+        return {"N": str(v)}
+    if is_sort_key:
+        try:
+            return {"N": str(int(v))}
+        except ValueError:
+            pass
+    return {"S": str(v)}
+
+def from_item(item: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    out = {}
+    for k, v in item.items():
+        if "S" in v:
+            out[k] = v["S"]
+        elif "N" in v:
+            nv = v["N"]
+            try:
+                out[k] = int(nv)
+            except ValueError:
+                out[k] = float(nv)
+        elif "BOOL" in v:
+            out[k] = v["BOOL"]
+        elif "M" in v:
+            out[k] = {ik: (iv.get("S") or iv.get("N") or iv.get("BOOL")) for ik, iv in v["M"].items()}
+        elif "L" in v:
+            out[k] = [iv.get("S") or iv.get("N") or iv.get("BOOL") for iv in v["L"]]
+        else:
+            out[k] = v
+    return out
+
+# ------------------ Postgres fetch ------------------------
+def getVals_from_pg(username: str) -> List[List[Any]]:
+    conn = None
+    events_list: List[List[Any]] = []
+    try:
+        print(f"[DEBUG] Connecting to Postgres at {PG_HOST}:{PG_PORT}, db={PG_DB}, user={PG_USER}")
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            dbname=PG_DB,
+            user=PG_USER,
+            password=PG_PASS,
+            connect_timeout=5,
+        )
+        print("[DEBUG] Connection established.")
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            query = f"""
+                SELECT {PG_EVENTS_COL}
+                FROM "{PG_TABLE}"
+                WHERE {PG_USER_COL} = %s
+                LIMIT 1
+            """
+            print(f"[DEBUG] Executing query with username={username}")
+            cur.execute(query, (username,))
+            row = cur.fetchone()
+            print(f"[DEBUG] Query result: {row}")
+            if row and row.get(PG_EVENTS_COL):
+                for entry in row[PG_EVENTS_COL]:
+                    print(f"[DEBUG] Processing entry: {entry}")
+                    if "#" in entry:
+                        activity, valid_until_str = entry.split("#", 1)
+                        try:
+                            valid_until = int(valid_until_str)
+                        except ValueError:
+                            print(f"[WARN] Could not convert {valid_until_str} to int")
+                            valid_until = valid_until_str
+                        events_list.append([activity, valid_until])
+            print(f"[DEBUG] Returning events_list: {events_list}")
+    except Exception as e:
+        print(f"[ERROR] Postgres query failed: {e}")
+    finally:
+        if conn:
+            conn.close()
+            print("[DEBUG] Postgres connection closed.")
+    return events_list
+
+# ------------------ Lambda ------------------------
+def lambda_handler(event, context):
+    print(f"[DEBUG] Incoming event: {event}")
+    if event.get("httpMethod") == "OPTIONS":
+        return response(200, {"ok": True})
+
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return response(400, {"error": "Invalid JSON body."})
+
+    print(f"[DEBUG] Parsed body: {body}")
+    username = body.get("UserID")
+    if not isinstance(username, str) or not username.strip():
+        return response(400, {"error": "Missing or invalid 'UserID'."})
+    username = username.strip()
+    print(f"[DEBUG] Using username: {username}")
+
+    # 1) Postgres
+    pairs = getVals_from_pg(username)
+    print(f"[DEBUG] pairs from Postgres: {pairs}")
+    if not pairs:
+        return response(200, {"count": 0, "items": []})
+
+    # 2) DynamoDB batch get
+    wanted_order: List[Tuple[str, str]] = [(str(pk), str(sk)) for pk, sk in pairs]
+
+    def chunk(lst, size):
+        for i in range(0, len(lst), size):
+            yield lst[i:i+size]
+
+    results_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for group in chunk(pairs, 100):
+        keys = [
+            {ATTR_PK_NAME: to_attr_val(pk), ATTR_SK_NAME: to_attr_val(sk, is_sort_key=True)}
+            for pk, sk in group
+        ]
+        print(f"[DEBUG] DynamoDB batch keys: {keys}")
+        request_items = {TABLE_NAME: {"Keys": keys}}
+        backoff = 0.2
+        while True:
+            start_time = time.time()
+            resp = DDB.batch_get_item(RequestItems=request_items)
+            duration = time.time() - start_time
+            print(f"[DEBUG] DynamoDB response received in {duration:.2f}s")
+            for item in resp.get("Responses", {}).get(TABLE_NAME, []):
+                obj = from_item(item)
+                key_pair = (str(obj.get(ATTR_PK_NAME)), str(obj.get(ATTR_SK_NAME)))
+                results_map[key_pair] = obj
+            unprocessed = resp.get("UnprocessedKeys", {})
+            print(f"[DEBUG] UnprocessedKeys: {unprocessed}")
+            if not unprocessed or not unprocessed.get(TABLE_NAME, {}).get("Keys"):
+                break
+            request_items = {"RequestItems": unprocessed} if "RequestItems" in unprocessed else unprocessed
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 2.0)
+
+    ordered_items = [results_map[k] for k in wanted_order if k in results_map]
+    print(f"[DEBUG] ordered_items: {ordered_items}")
+
+    return response(200, {
+        "count": len(ordered_items),
+        "items": ordered_items
+    })

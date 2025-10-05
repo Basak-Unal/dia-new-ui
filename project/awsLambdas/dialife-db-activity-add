@@ -1,0 +1,105 @@
+import json
+import os
+import psycopg2
+import psycopg2.extras
+from decimal import Decimal
+from typing import Dict, Any
+
+# ---------- Postgres config ----------
+PG_HOST = os.environ.get("PG_HOST")
+PG_PORT = int(os.environ.get("PG_PORT", "5432"))
+PG_DB   = os.environ.get("PG_DATABASE")
+PG_USER = os.environ.get("PG_USER")
+PG_PASS = os.environ.get("PG_PASSWORD")
+
+# ------------------ Helpers ------------------------
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "OPTIONS,POST",
+    }
+
+def json_default(o):
+    if isinstance(o, Decimal):
+        return int(o) if o % 1 == 0 else float(o)
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+def response(status: int, body: Dict[str, Any]):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json", **cors_headers()},
+        "body": json.dumps(body, default=json_default),
+    }
+
+# ------------------ Lambda ------------------------
+def lambda_handler(event, context):
+    # CORS preflight
+    if event.get("httpMethod") == "OPTIONS":
+        return response(200, {"ok": True})
+
+    # Parse body
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return response(400, {"error": "Invalid JSON body."})
+
+    # ✅ Updated field names
+    host = body.get("Host")
+    activity_type = body.get("ActivityType")
+    valid_until = body.get("ValidUntill")  # frontend sends with two L's
+
+    if not all(v is not None for v in [host, activity_type, valid_until]):
+        return response(400, {"error": "Missing one of 'Host', 'ActivityType', or 'ValidUntill'."})
+
+    # Convert timestamp to string if numeric
+    valid_until_str = str(valid_until)
+    new_event = f"{activity_type}#{valid_until_str}"
+
+    conn = None
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            dbname=PG_DB,
+            user=PG_USER,
+            password=PG_PASS,
+            connect_timeout=5,
+        )
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # ✅ Ensure we always append to JSON array
+            query = '''
+                UPDATE "User"
+                SET "events_applied" =
+                    COALESCE("events_applied", '[]'::jsonb) || to_jsonb(%s::text)
+                WHERE "username" = %s
+                RETURNING "events_applied"
+            '''
+            cur.execute(query, (new_event, host))
+            updated_row = cur.fetchone()
+            conn.commit()
+
+            if not updated_row:
+                return response(404, {"error": f"User '{host}' not found."})
+
+            events_applied = updated_row["events_applied"]
+            events_list = []
+            for entry in events_applied:
+                if isinstance(entry, str) and "#" in entry:
+                    act, until = entry.split("#", 1)
+                    events_list.append({"ActivityType": act, "ValidUntill": until})
+
+            return response(200, {
+                "count": len(events_list),
+                "items": events_list
+            })
+
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        return response(500, {"error": f"Database error: {str(e)}"})
+
+    finally:
+        if conn:
+            conn.close()

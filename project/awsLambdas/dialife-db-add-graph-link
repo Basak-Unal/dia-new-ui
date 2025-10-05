@@ -1,0 +1,38 @@
+import boto3
+import json
+from boto3.dynamodb.conditions import Key
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('dialife-piece-text')
+
+def lambda_handler(event, context):
+    """
+    This function adds one or more links from a source entry to target entries.
+    *********
+    Arguments:
+    event['body']: JSON string with:
+        - UserID: str
+        - Timestamp: int
+        - Links: list of {type: str, to: int}
+    **********
+    Returns:
+    dict - Success or error message
+    """
+    body = json.loads(event['body'])
+    user_id = body['UserID']
+    timestamp = body['Timestamp']
+    new_links = body['Links']  # should be a list of dicts
+
+    response = table.update_item(
+        Key={'UserID': user_id, 'Timestamp': timestamp},
+        UpdateExpression="SET Links = list_append(if_not_exists(Links, :empty), :new)",
+        ExpressionAttributeValues={
+            ':new': new_links,
+            ':empty': []
+        }
+    )
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps({'message': 'Links added'})
+    }

@@ -1,0 +1,184 @@
+import json
+import os
+import re
+import uuid
+from datetime import datetime, timezone
+import boto3
+from boto3.dynamodb.conditions import Attr
+
+# Set via Lambda env var; falls back to your table name
+TABLE_NAME = os.environ.get("TABLE_NAME", "dialife-activity")
+dynamodb = boto3.resource("dynamodb")
+table = dynamodb.Table(TABLE_NAME)
+
+ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# --- Utilities --------------------------------------------------------------
+
+def parse_epoch(value) -> int | None:
+    """
+    Accepts:
+      - int/float epoch
+      - str of digits (10 = seconds, 13 = milliseconds)
+    Returns epoch milliseconds as int, or None if invalid.
+    """
+    # Normalize to string of digits
+    s = None
+    if isinstance(value, (int, float)):
+        s = str(int(value))
+    elif isinstance(value, str):
+        s = value.strip()
+    else:
+        return None
+
+    if not s.isdigit():
+        return None
+
+    # Length-based heuristic
+    if len(s) == 13:
+        ms = int(s)
+    elif len(s) == 10:
+        ms = int(s) * 1000
+    else:
+        # Fallback: try interpreting as milliseconds
+        try:
+            ms = int(s)
+        except ValueError:
+            return None
+
+    # Basic sanity check: between 2000-01-01 and 2100-01-01
+    try:
+        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        if not (datetime(2000, 1, 1, tzinfo=timezone.utc) <= dt <= datetime(2100, 1, 1, tzinfo=timezone.utc)):
+            return None
+    except Exception:
+        return None
+
+    return ms
+
+
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "OPTIONS,POST",
+    }
+
+
+def response(status: int, body: dict):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json", **cors_headers()},
+        "body": json.dumps(body),
+    }
+
+
+def load_json(event):
+    if event.get("isBase64Encoded"):
+        import base64
+        raw = base64.b64decode(event.get("body") or b"").decode("utf-8", errors="replace")
+    else:
+        raw = event.get("body") or ""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+# --- Validation & Normalization --------------------------------------------
+
+# We’ll accept a few aliases but store exactly the keys you requested
+ALIASES = {
+    "ValidUntill": {"ValidUntil", "Validuntill", "ValidUntill", "validuntill", "validUntill"},
+    "ActivityType": {"type", "activityType", "Type"},
+    "City": {"city", "City"},
+    "Description": {"description", "desc", "Description"},
+    "Signed": {"signed", "isSigned", "Signed"},
+    "Finished": {"finished", "isFinished", "Finished"},
+    "Host" : {"host", "Host"}
+}
+
+REQUIRED_FIELDS = ["ActivityType", "ValidUntill", "City", "Description"]
+
+def normalize_keys(payload: dict) -> dict:
+    """Normalize alias keys to the canonical ones used in storage."""
+    out = dict(payload)
+    for canon, variants in ALIASES.items():
+        for v in variants:
+            if v in out and canon not in out:
+                out[canon] = out[v]
+    return out
+
+
+def validate(payload: dict) -> list[str]:
+    errors = []
+
+    # Required presence
+    for f in REQUIRED_FIELDS:
+        if f not in payload:
+            errors.append(f"Missing required field: '{f}'")
+
+    if errors:
+        return errors
+
+    # Type validations (strings)
+    if not isinstance(payload["ActivityType"], str) or not payload["ActivityType"].strip():
+        errors.append("Field 'ActivityType' must be a non-empty string.")
+
+    if not isinstance(payload["City"], str) or not payload["City"].strip():
+        errors.append("Field 'City' must be a non-empty string.")
+
+    if not isinstance(payload["Description"], str) or not payload["Description"].strip():
+        errors.append("Field 'Description' must be a non-empty string.")
+    elif len(payload["Description"]) > 2000:
+        errors.append("Field 'Description' is too long (max 2000 characters).")
+
+    # Booleans (optional; default False)
+    if "Signed" in payload and not isinstance(payload["Signed"], bool):
+        errors.append("Field 'Signed' must be boolean (true/false) if provided.")
+    if "Finished" in payload and not isinstance(payload["Finished"], bool):
+        errors.append("Field 'Finished' must be boolean (true/false) if provided.")
+
+    # ValidUntill: epoch ms
+    ms = parse_epoch(payload["ValidUntill"])
+    if ms is None:
+        errors.append("Field 'ValidUntill' must be a Unix timestamp (seconds or milliseconds).")
+    else:
+        payload["ValidUntill"] = ms  # normalize to milliseconds int
+
+    return errors
+
+# --- Lambda Handler ---------------------------------------------------------
+
+def lambda_handler(event, context):
+    # Preflight for CORS (if behind API Gateway/HTTP API)
+    if event.get("httpMethod") == "OPTIONS":
+        return response(200, {"ok": True})
+
+    data = load_json(event)
+    if data is None or not isinstance(data, dict):
+        return response(400, {"error": "Invalid JSON body."})
+
+    data = normalize_keys(data)
+    errs = validate(data)
+    if errs:
+        return response(400, {"errors": errs})
+
+    # Build the item to store
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    item = {
+        "id": str(uuid.uuid4()),                              # Partition key (string)
+        "ActivityType": data["ActivityType"].strip(),
+        "ValidUntill": int(data["ValidUntill"]),              # epoch ms
+        "City": data["City"].strip(),
+        "Description": data["Description"].strip(),
+        "Signed": [],
+        "Finished": [],
+        "CreatedAt": now_iso,
+        "Host": data["Host"].strip(),
+        "Going": 1
+    }
+
+    # Put item
+    table.put_item(Item=item)
+
+    return response(201, {"id": item["id"], "message": "Activity stored."})

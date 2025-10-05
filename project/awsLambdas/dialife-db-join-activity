@@ -1,0 +1,109 @@
+import json
+import os
+from datetime import datetime, timezone
+import boto3
+from boto3.dynamodb.conditions import Attr
+
+TABLE_NAME = os.environ.get("TABLE_NAME", "dialife-activity")
+dynamodb = boto3.resource("dynamodb")
+table = dynamodb.Table(TABLE_NAME)
+
+# ---------- helpers ----------
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "OPTIONS,POST,PUT",
+    }
+
+def response(status: int, body: dict):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json", **cors_headers()},
+        "body": json.dumps(body),
+    }
+
+def load_json(event):
+    if event.get("isBase64Encoded"):
+        import base64
+        raw = base64.b64decode(event.get("body") or b"").decode("utf-8", errors="replace")
+    else:
+        raw = event.get("body") or ""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+
+def parse_epoch_ms(value):
+    """Accept 10-digit seconds or 13-digit milliseconds; return milliseconds (int) or None."""
+    s = None
+    if isinstance(value, (int, float)):
+        s = str(int(value))
+    elif isinstance(value, str):
+        s = value.strip()
+    else:
+        return None
+    if not s.isdigit():
+        return None
+    if len(s) == 13:
+        ms = int(s)
+    elif len(s) == 10:
+        ms = int(s) * 1000
+    else:
+        try:
+            ms = int(s)
+        except ValueError:
+            return None
+    # sanity 2000..2100
+    try:
+        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        if not (datetime(2000, 1, 1, tzinfo=timezone.utc) <= dt <= datetime(2100, 1, 1, tzinfo=timezone.utc)):
+            return None
+    except Exception:
+        return None
+    return ms
+
+# ---------- lambda ----------
+def lambda_handler(event, context):
+    # CORS preflight
+    if event.get("httpMethod") == "OPTIONS":
+        return response(200, {"ok": True})
+
+    data = load_json(event)
+    if not isinstance(data, dict):
+        return response(400, {"error": "Invalid JSON body."})
+
+    # Required fields - UserID removed
+    for key in ("ActivityType", "ValidUntill"):
+        if key not in data:
+            return response(400, {"error": f"Missing required field: {key}"})
+
+    activity_type = str(data["ActivityType"]).strip()
+    valid_ms = parse_epoch_ms(data["ValidUntill"])
+
+    if not activity_type:
+        return response(400, {"error": "ActivityType must be a non-empty string."})
+    if valid_ms is None:
+        return response(400, {"error": "ValidUntill must be a Unix timestamp (seconds or milliseconds)."})
+
+    try:
+        # Atomic increment without UserID condition
+        r = table.update_item(
+            Key={"ActivityType": activity_type, "ValidUntill": valid_ms},
+            UpdateExpression="SET Going = if_not_exists(Going, :z) + :one",
+            ExpressionAttributeValues={":z": 0, ":one": 1},
+            ReturnValues="UPDATED_NEW",
+        )
+        new_val = int(r["Attributes"]["Going"])
+        return response(200, {
+            "ActivityType": activity_type,
+            "ValidUntill": valid_ms,
+            "Going": new_val,
+            "message": "Going incremented successfully.",
+        })
+
+    except dynamodb.meta.client.exceptions.ResourceNotFoundException:
+        return response(404, {"error": "Activity not found."})
+    except Exception as e:
+        print(f"[ERROR] update_item failed: {e}")
+        return response(500, {"error": "Failed to increment Going."})

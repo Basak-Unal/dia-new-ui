@@ -1,0 +1,29 @@
+import boto3
+import json
+from boto3.dynamodb.conditions import Key
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('dialife-piece-text')
+
+def lambda_handler(event, context):
+    """
+    This function retrieves entries for a user between two timestamps (inclusive).
+    *********
+    Arguments:
+    event: dict - should include queryStringParameters with 'userID', 'timeFrom', and 'timeTo'
+    context: AWS Lambda context object (unused)
+    **********
+    Returns:
+    dict - JSON response containing a list of filtered entries, HTTP status code 200
+    """
+    params = event['queryStringParameters']
+    user_id = params['userID']
+    from_ts = params['timeFrom']
+    to_ts = params['timeTo']
+    response = table.query(
+        KeyConditionExpression=Key('UserID').eq(user_id) & Key('Timestamp').between(from_ts, to_ts)
+    )
+    return {
+        'statusCode': 200,
+        'body': json.dumps(response['Items'], default = str)
+    }

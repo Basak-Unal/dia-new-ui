@@ -1,0 +1,77 @@
+import json
+import psycopg2
+import os
+from datetime import datetime
+
+
+def handler(event, context):
+    """
+    AWS Lambda function to create a new user entry in a PostgreSQL database using data
+    received in the HTTP request body.
+
+    Expected Request Format (JSON in the request body):
+    {
+        "username": "string",
+        "password": "string",
+        "profile_pic": "string", # Optional
+        "bio": "string", # Optional
+        "name": "string", # Optional
+        "surname": "string", # Optional
+        "followers": [string], # Optional, defaults to empty list
+        "following": [string] # Optional, defaults to empty list
+        "events_applied": [string] # optional, defaults []
+    }
+
+    Function Behavior:
+    Inserts user data into the users table and sets a created_at timestamp.
+    """
+    try:
+        # Connect to the database
+        conn = psycopg2.connect(
+            host=os.environ['DB_HOST'],
+            dbname=os.environ['DB_NAME'],
+            user=os.environ['DB_USER'],
+            password=os.environ['DB_PASSWORD'],
+            port=os.environ['DB_PORT']
+        )
+        cursor = conn.cursor()
+
+        # Parse the request body
+        body = json.loads(event['body'])
+
+        username = body.get('username')
+        password = body.get('password')
+        profile_pic = body.get('profile_pic')
+        bio = body.get('bio')
+        name = body.get('name')
+        surname = body.get('surname')
+        followers = body.get('followers', [])  # Should be list of usernames
+        following = body.get('following', [])
+        events_applied = body.get('events_applied', [])
+        created_at = datetime.utcnow()
+
+        # Insert into the users table
+        cursor.execute("""
+            INSERT INTO "User" (
+                username, password, created_at, profile_pic, bio,
+                name, surname, followers, following, events_applied
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            username, password, created_at, profile_pic, bio,
+            name, surname, json.dumps(followers), json.dumps(following), json.dumps(events_applied)
+        ))
+
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({'message': 'User added successfully'})
+        }
+
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }

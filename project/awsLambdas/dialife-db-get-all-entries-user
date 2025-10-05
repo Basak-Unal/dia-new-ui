@@ -1,0 +1,147 @@
+import os
+import json
+import base64
+import decimal
+import boto3
+from boto3.dynamodb.conditions import Key
+from typing import Any, Dict, List, Optional, Union
+
+dynamodb = boto3.resource('dynamodb')
+TABLE_NAME = os.getenv('TABLE_NAME', 'dialife-piece-text')
+table = dynamodb.Table(TABLE_NAME)
+
+# ---------- JSON safety helpers ----------
+
+def _to_jsonable(obj: Any) -> Any:
+    """Convert DynamoDB/odd types into JSON-safe primitives."""
+    # Decimal -> int or float
+    if isinstance(obj, decimal.Decimal):
+        return int(obj) if obj % 1 == 0 else float(obj)
+
+    # bytes/bytearray -> utf-8 (fallback base64)
+    if isinstance(obj, (bytes, bytearray)):
+        try:
+            return obj.decode("utf-8")
+        except Exception:
+            return base64.b64encode(bytes(obj)).decode("ascii")
+
+    # boto3.dynamodb.types.Binary -> base64 string
+    try:
+        import boto3.dynamodb.types as ddbt  # type: ignore
+        if hasattr(ddbt, "Binary") and isinstance(obj, ddbt.Binary):
+            return base64.b64encode(bytes(obj)).decode("ascii")
+    except Exception:
+        pass
+
+    # ❗️Sets & tuples from DynamoDB (SS/NS/BS become Python sets)
+    if isinstance(obj, (set, frozenset, tuple)):
+        return [_to_jsonable(v) for v in list(obj)]
+
+    if isinstance(obj, list):
+        return [_to_jsonable(v) for v in obj]
+
+    if isinstance(obj, dict):
+        return {str(k): _to_jsonable(v) for k, v in obj.items()}
+
+    return obj
+
+def _safe_dumps(data: Any) -> str:
+    """json.dumps that won't choke on DynamoDB types or bytes."""
+    return json.dumps(_to_jsonable(data), ensure_ascii=False)
+
+def _safe_str(e: Exception) -> str:
+    """Always return a safe, printable error string."""
+    try:
+        s = str(e)
+        if isinstance(s, (bytes, bytearray)):
+            return s.decode("utf-8", "replace")
+        return s
+    except Exception:
+        return repr(e)
+
+def _ok(body: Any, extra_headers: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    headers = {"Content-Type": "application/json"}
+    if extra_headers:
+        headers.update(extra_headers)
+    return {"statusCode": 200, "headers": headers, "body": _safe_dumps(body)}
+
+def _bad(status: int, message: str) -> Dict[str, Any]:
+    return {"statusCode": status, "headers": {"Content-Type": "application/json"},
+            "body": _safe_dumps({"error": message})}
+
+# ---------- Sorting helper ----------
+
+def _parse_ts(v: Union[str, int, float, decimal.Decimal, bytes, bytearray]) -> Union[float, str]:
+    """Coerce Timestamp to a sortable value (larger/newer first)."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, decimal.Decimal):
+        return float(v)
+    if isinstance(v, (bytes, bytearray)):
+        try:
+            v = v.decode("utf-8")
+        except Exception:
+            return 0.0
+    # Try numeric-from-string first; else fall back to lexicographic string
+    try:
+        return float(v)  # handles "1755457716" etc.
+    except Exception:
+        return str(v)     # ISO8601 sorts lexicographically
+
+# ---------- Query logic ----------
+
+def query_one_privacy(user_id: str, privacy_level: int, limit_per_priv: int = 15) -> List[Dict[str, Any]]:
+    """
+    Query latest items for a single privacy level for this user.
+    Uses descending order (most recent first) and grabs up to `limit_per_priv`.
+    """
+    items: List[Dict[str, Any]] = []
+    exclusive_start_key: Optional[Dict[str, Any]] = None
+
+    while len(items) < limit_per_priv:
+        kwargs: Dict[str, Any] = {
+            "KeyConditionExpression": Key('UserID').eq(f"{user_id}#{privacy_level}"),
+            "ScanIndexForward": False,  # sort key descending
+            "Limit": limit_per_priv - len(items),
+        }
+        if exclusive_start_key:
+            kwargs["ExclusiveStartKey"] = exclusive_start_key
+
+        resp = table.query(**kwargs)
+        items.extend(resp.get('Items', []))
+        exclusive_start_key = resp.get('LastEvaluatedKey')
+        if not exclusive_start_key:
+            break
+
+    return items
+
+# ---------- Handler ----------
+
+def lambda_handler(event, context):
+    """
+    Fetch the most recent 15 posts for a user across privacy levels {0,1,2},
+    ordered by Timestamp (newest first).
+
+    Call as: GET /entries?UserID=<username>
+    """
+    try:
+        qs = event.get('queryStringParameters') or {}
+        user_id = qs.get('UserID') or qs.get('userID') or qs.get('userId') or qs.get('UserId')
+        if not user_id:
+            return _bad(400, "Missing query param: UserID")
+
+        # Collect up to 15 per privacy bucket
+        per_priv_limit = 15
+        buckets: List[Dict[str, Any]] = []
+        for level in (0, 1, 2):
+            buckets.extend(query_one_privacy(user_id, level, per_priv_limit))
+
+        # Merge & take overall newest 15
+        buckets.sort(key=lambda it: _parse_ts(it.get('Timestamp')), reverse=True)
+        top_15 = buckets[:15]
+
+        return _ok(top_15)
+
+    except Exception as e:
+        # Surface the error safely
+        return _bad(500, _safe_str(e))

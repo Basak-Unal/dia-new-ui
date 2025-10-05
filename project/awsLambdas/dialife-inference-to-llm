@@ -1,0 +1,61 @@
+import os
+import json
+import boto3
+
+# Bedrock client
+bedrock = boto3.client("bedrock-runtime", region_name=os.environ.get("BEDROCK_REGION", "eu-central-1"))
+
+# Titan G1 Lite model ID
+MODEL_ID = os.environ.get("MODEL_ID", "amazon.titan-text-lite-v1")  # Titan Text G1 - Lite
+
+def lambda_handler(event, context):
+    """
+    Wrapper Lambda for Titan Text G1 - Lite
+    Expects event like:
+    {
+        "prompt": "Write me a haiku about the moon."
+    }
+    """
+    try:
+        # Extract prompt
+        body = event.get("body")
+        if isinstance(body, str):
+            body = json.loads(body)
+        prompt = body.get("prompt", "")
+
+        if not prompt:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Missing 'prompt'"})
+            }
+
+        # Build request for Titan Text G1 Lite
+        bedrock_request = {
+            "inputText": prompt,
+            "textGenerationConfig": {
+                "maxTokenCount": 512,   # cap output length
+                "temperature": 0.7,     # creativity
+                "topP": 0.9             # nucleus sampling
+            }
+        }
+
+        response = bedrock.invoke_model(
+            modelId=MODEL_ID,
+            body=json.dumps(bedrock_request)
+        )
+
+        # Parse response
+        response_body = json.loads(response["body"].read())
+        output_text = response_body.get("results", [{}])[0].get("outputText", "")
+
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"output": output_text})
+        }
+
+    except Exception as e:
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }

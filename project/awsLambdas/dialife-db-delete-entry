@@ -1,0 +1,37 @@
+import boto3
+import json
+from boto3.dynamodb.conditions import Key
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('dialife-piece-text')
+
+def lambda_handler(event, context):
+    """
+    This function deletes a specific entry from the DynamoDB table based on UserID and Timestamp.
+    *********
+    Arguments:
+    event: dict - should include 'body' with 'UserID' (str) and 'Timestamp' (int)
+    context: AWS Lambda context object (unused)
+    **********
+    Returns:
+    dict - JSON response with deletion status, HTTP status code 200 if deleted, 404 if not found
+    """
+    body = json.loads(event['body'])
+    response = table.delete_item(
+        Key={
+            'UserID': body['UserID'],
+            'Timestamp': body['Timestamp']
+        },
+        ReturnValues='ALL_OLD'
+    )
+
+    if 'Attributes' not in response:
+        return {
+            'statusCode': 404,
+            'body': json.dumps({'error': 'Entry not found'})
+        }
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps({'message': 'Entry deleted'})
+    }

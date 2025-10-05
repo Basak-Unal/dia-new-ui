@@ -1,0 +1,128 @@
+import os, json, time, math, base64
+from array import array
+import boto3
+from botocore.exceptions import ClientError
+
+# ---- env ----
+TAGS_TABLE      = os.environ["TAGS_TABLE"]
+BEDROCK_REGION  = os.environ.get("BEDROCK_REGION", "eu-central-1")
+EMBED_MODEL_ID  = os.environ.get("EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
+TAG_EMBED_DIM   = int(os.environ.get("TAG_EMBED_DIM", "256"))
+
+ddb     = boto3.client("dynamodb")
+bedrock = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
+
+def _resp(code, body):
+    return {
+        "statusCode": code,
+        "headers": {"Content-Type":"application/json"},
+        "body": json.dumps(body)
+    }
+
+def _parse_event(event):
+    # API Gateway proxy veya direkt invoke destekler
+    if isinstance(event, dict) and "body" in event:
+        raw = event["body"] or "{}"
+        if event.get("isBase64Encoded"):
+            raw = base64.b64decode(raw).decode("utf-8")
+        return json.loads(raw)
+    return event if isinstance(event, dict) else {}
+
+def _validate(p):
+    errs = []
+    name = p.get("name")
+    desc = p.get("description", "")
+    if not isinstance(name, str) or not name.strip():
+        errs.append("name must be a non-empty string")
+    if not isinstance(desc, str):
+        errs.append("description must be a string")
+    return errs, (name.strip() if isinstance(name, str) else None, desc.strip())
+
+def _l2(vec):
+    n = math.sqrt(sum(v*v for v in vec)) or 1.0
+    return [v/n for v in vec]
+
+def _embed(text: str):
+    # Titan Embeddings v2 – boyutu env'den seçiyoruz (256/512/1024)
+    body = json.dumps({
+        "inputText": text,
+        "dimensions": TAG_EMBED_DIM,
+        # "normalize": True  # istersen aç; biz zaten Python tarafında normalize ediyoruz
+    })
+    r = bedrock.invoke_model(
+        modelId=EMBED_MODEL_ID,
+        contentType="application/json",
+        accept="application/json",
+        body=body
+    )
+    out = json.loads(r["body"].read())
+    vec = [float(x) for x in out["embedding"]]
+    vec = _l2(vec)  # kozinüs için normalize
+    buf = array("f", vec).tobytes()  # float32 packed
+    return buf, len(vec)
+
+def lambda_handler(event, context):
+    try:
+        payload = _parse_event(event)
+        errs, (name, desc) = _validate(payload)
+        if errs:
+            return _resp(400, {"error":"validation_failed", "details": errs})
+
+        now_ms = int(time.time()*1000)
+
+        # 1) aynı isim var mı?
+        name_key = {"PK":{"S":f"TAG#{name}"}, "SK":{"S":"META"}}
+        got = ddb.get_item(TableName=TAGS_TABLE, Key=name_key)
+        if "Item" in got:
+            return _resp(409, {"error":"tag_name_exists"})
+
+        # 2) embedding üret (açıklama yoksa isimden)
+        emb_bytes, dim = _embed(desc or name)
+
+        # 3) sayaçtan index al (atomik)
+        counter_key = {"PK":{"S":"SYS#TAGCOUNTER"}, "SK":{"S":"META"}}
+        upd = ddb.update_item(
+            TableName=TAGS_TABLE,
+            Key=counter_key,
+            UpdateExpression="SET #c = if_not_exists(#c, :z) + :one",
+            ExpressionAttributeNames={"#c":"Counter"},
+            ExpressionAttributeValues={":z":{"N":"0"}, ":one":{"N":"1"}},
+            ReturnValues="ALL_NEW"
+        )
+        idx = int(upd["Attributes"]["Counter"]["N"])
+
+        # 4) tag meta (isim -> tam kayıt)
+        ddb.put_item(
+            TableName=TAGS_TABLE,
+            Item={
+                "PK": {"S": f"TAG#{name}"},
+                "SK": {"S": "META"},
+                "TagName": {"S": name},
+                "TagIndex": {"N": str(idx)},
+                "Description": {"S": desc},
+                "EmbeddingB": {"B": emb_bytes},   # ~256-dim -> ~1KB; 1024-dim -> ~4KB
+                "Dim": {"N": str(dim)},
+                "UpdatedAt": {"N": str(now_ms)}
+            },
+            ConditionExpression="attribute_not_exists(PK)"
+        )
+
+        # 5) index -> isim map (hızlı GetItem için)
+        ddb.put_item(
+            TableName=TAGS_TABLE,
+            Item={
+                "PK": {"S": f"TAGIDX#{idx}"},
+                "SK": {"S": "NAME"},
+                "TagName": {"S": name},
+                "TagIndex": {"N": str(idx)},
+                "CreatedAt": {"N": str(now_ms)}
+            },
+            ConditionExpression="attribute_not_exists(PK)"
+        )
+
+        return _resp(200, {"ok": True, "name": name, "index": idx, "dim": dim, "updatedAt": now_ms})
+
+    except ClientError as e:
+        return _resp(500, {"error":"aws_client_error", "details": str(e)})
+    except Exception as e:
+        return _resp(500, {"error":"internal_error", "details": str(e)})

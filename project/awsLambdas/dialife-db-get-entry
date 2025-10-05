@@ -1,0 +1,44 @@
+import boto3
+import json
+from boto3.dynamodb.conditions import Key
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('dialife-piece-text')
+
+def lambda_handler(event, context):
+    """
+    This function retrieves a single entry from the DynamoDB table by its primary and sort key.
+    *********
+    Arguments:
+    event: dict - should include queryStringParameters with 'userID' (S) and 'timestamp' (N)
+    context: AWS Lambda context object (unused)
+    **********
+    Returns:
+    dict - JSON response containing the item or empty if not found, HTTP status code 200
+    """
+    try:
+        params = event.get("queryStringParameters", {})
+        user_id = params.get("UserID")
+        timestamp = params.get("Timestamp")
+        if not user_id or not timestamp:
+            return {
+                "statusCode": 400,
+                "body": json.dumps({"error": "Missing UserID or Timestamp"})
+            }
+
+        response = table.get_item(Key={
+            'UserID': user_id,
+            'Timestamp': int(timestamp)  # Force correct type here
+        })
+
+        item = response.get('Item', {})
+        return {
+            'statusCode': 200,
+            'body': json.dumps(item, default=str)
+        }
+
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': json.dumps({"message": "Internal Server Error", "error": str(e)})
+        }

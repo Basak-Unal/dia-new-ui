@@ -1,0 +1,129 @@
+import json
+import os
+from datetime import datetime, timezone
+from decimal import Decimal
+
+import boto3
+from boto3.dynamodb.conditions import Attr
+
+TABLE_NAME = os.environ.get("TABLE_NAME", "dialife-activity")
+dynamodb = boto3.resource("dynamodb")
+table = dynamodb.Table(TABLE_NAME)
+
+# ---------- utils ----------
+
+def parse_epoch(value) -> int | None:
+    if isinstance(value, (int, float)):
+        s = str(int(value))
+    elif isinstance(value, str):
+        s = value.strip()
+    else:
+        return None
+
+    if not s or not s.isdigit():
+        return None
+
+    # 10-digit seconds or 13-digit milliseconds (others: try int -> ms)
+    if len(s) == 13:
+        ms = int(s)
+    elif len(s) == 10:
+        ms = int(s) * 1000
+    else:
+        try:
+            ms = int(s)
+        except ValueError:
+            return None
+
+    try:
+        dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        if not (datetime(2000, 1, 1, tzinfo=timezone.utc) <= dt <= datetime(2100, 1, 1, tzinfo=timezone.utc)):
+            return None
+    except Exception:
+        return None
+
+    return ms
+
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "OPTIONS,GET",  # <-- GET now
+    }
+
+def json_default(o):
+    if isinstance(o, Decimal):
+        return int(o) if o % 1 == 0 else float(o)
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+def response(status: int, body: dict):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json", **cors_headers()},
+        "body": json.dumps(body, default=json_default),
+    }
+
+def get_method(event) -> str:
+    return (event.get("httpMethod")
+            or event.get("requestContext", {}).get("http", {}).get("method")
+            or "").upper()
+
+def get_query_params(event) -> dict:
+    params = event.get("queryStringParameters")
+    return params if isinstance(params, dict) else {}
+
+# ---------- lambda ----------
+
+def lambda_handler(event, context):
+    method = get_method(event)
+
+    # CORS preflight
+    if method == "OPTIONS":
+        return response(200, {"ok": True})
+
+    if method != "GET":
+        return response(405, {"error": "Method Not Allowed. Use GET."})
+
+    params = get_query_params(event)
+
+    # Read filters from query string (treat empty as wildcard)
+    activity_type = (params.get("ActivityType") or "").strip()
+    city = (params.get("City") or "").strip()
+
+    valid_raw = params.get("ValidUntill")
+    ts_ms = parse_epoch(valid_raw) if valid_raw is not None else int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+
+    if ts_ms is None:
+        return response(400, {"error": "ValidUntill must be a Unix timestamp (seconds or milliseconds)."})
+
+    # Build FilterExpression dynamically (only include provided filters)
+    filt = Attr("ValidUntill").gte(ts_ms)
+    if activity_type:
+        filt = filt & Attr("ActivityType").eq(activity_type)
+    if city:
+        filt = filt & Attr("City").eq(city)
+
+    results = []
+    last_evaluated_key = None
+    while len(results) < 15:
+        kwargs = {
+            "FilterExpression": filt,
+            "ProjectionExpression": "#id, ActivityType, City, Description, Signed, Finished, ValidUntill, CreatedAt, Host, Going",
+            "ExpressionAttributeNames": {"#id": "id"},
+            "Limit": 50,  # pre-filter batch size
+        }
+        if last_evaluated_key:
+            kwargs["ExclusiveStartKey"] = last_evaluated_key
+
+        resp = table.scan(**kwargs)
+        items = resp.get("Items", [])
+        results.extend(items)
+
+        last_evaluated_key = resp.get("LastEvaluatedKey")
+        if not last_evaluated_key or len(results) >= 15:
+            break
+
+    # Sort by soonest ValidUntill (ascending) and trim to 15
+    results.sort(key=lambda x: x.get("ValidUntill", 2**63 - 1))
+    results = results[:15]
+
+    return response(200, {"count": len(results), "items": results})

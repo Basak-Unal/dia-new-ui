@@ -1,0 +1,43 @@
+import boto3
+import json
+from boto3.dynamodb.conditions import Key
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('dialife-piece-text')
+
+def lambda_handler(event, context):
+    """
+    This function returns the entries this one points to, optionally filtered by link type.
+    *********
+    Arguments:
+    queryStringParameters:
+        - userID: str
+        - timestamp: int
+        - type (optional): str (e.g., 'reflection')
+    **********
+    Returns:
+    dict - List of linked entries
+    """
+    user_id = event['queryStringParameters']['userID']
+    timestamp = int(event['queryStringParameters']['timestamp'])
+    filter_type = event['queryStringParameters'].get('type')
+
+    base_item = table.get_item(Key={'UserID': user_id, 'Timestamp': timestamp}).get('Item', {})
+    links = base_item.get('Links', [])
+
+    if filter_type:
+        links = [l for l in links if l['Relation'] == filter_type]
+
+    keys = [{'UserID': user_id, 'Timestamp': l['To']} for l in links]
+
+    if not keys:
+        return {'statusCode': 200, 'body': json.dumps([])}
+
+    result = dynamodb.batch_get_item(RequestItems={
+        'dialife-piece-text': {'Keys': keys}
+    })
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps(result['Responses']['dialife-piece-text'], default=str)
+    }

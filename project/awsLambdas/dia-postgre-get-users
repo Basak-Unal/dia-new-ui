@@ -1,0 +1,74 @@
+import json
+import psycopg2
+import os
+
+
+def lambda_handler(event, context):
+    try:
+        conn = psycopg2.connect(
+            host=os.environ['DB_HOST'],
+            dbname=os.environ['DB_NAME'],
+            user=os.environ['DB_USER'],
+            password=os.environ['DB_PASSWORD'],
+            port=os.environ['DB_PORT']
+        )
+        cursor = conn.cursor()
+
+        body = {}
+        if 'body' in event and event['body']:
+            try:
+                body = json.loads(event['body'])
+            except Exception:
+                body = {}
+
+        params = event.get('queryStringParameters') or {}
+        username = (params.get('username') if isinstance(params, dict) else None) or body.get('username')
+
+        if username:
+            cursor.execute('SELECT * FROM "User" WHERE username = %s', (username,))
+            user = cursor.fetchone()
+            if user:
+                columns = [desc[0] for desc in cursor.description]
+                user_dict = dict(zip(columns, user))
+
+                # Convert JSONB fields to Python types only if they are strings
+                for field in ['followers', 'following', 'liked_posts', 'shared_posts']:
+                    val = user_dict.get(field)
+                    if isinstance(val, str):
+                        try:
+                            user_dict[field] = json.loads(val)
+                        except Exception:
+                            pass
+
+                result = user_dict
+            else:
+                result = {"message": "User not found"}
+        else:
+            cursor.execute('SELECT * FROM "User"')
+            users = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            result = []
+            for user_row in users:
+                user_dict = dict(zip(columns, user_row))
+                for field in ['followers', 'following', 'liked_posts', 'shared_posts']:
+                    val = user_dict.get(field)
+                    if isinstance(val, str):
+                        try:
+                            user_dict[field] = json.loads(val)
+                        except Exception:
+                            pass
+                result.append(user_dict)
+
+        cursor.close()
+        conn.close()
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps(result, default=str)
+        }
+
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }

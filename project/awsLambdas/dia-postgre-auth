@@ -1,0 +1,114 @@
+import os
+import json
+import psycopg2
+import base64
+
+
+def _cors_headers():
+    origin = os.environ.get("ALLOWED_ORIGIN", "*")  # set to your domain in prod
+    return {
+        "Access-Control-Allow-Origin": origin,
+        "Access-Control-Allow-Methods": "POST,OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Content-Type": "application/json",
+    }
+
+
+def _resp(status, body):
+    return {
+        "statusCode": status,
+        "headers": _cors_headers(),
+        "body": json.dumps(body, default=str),
+    }
+
+
+def _method(event):
+    http = event.get("requestContext", {}).get("http", {})
+    return (http.get("method") or event.get("httpMethod") or "").upper()
+
+
+def _body(event):
+    b = event.get("body")
+    if b and event.get("isBase64Encoded"):
+        b = base64.b64decode(b).decode("utf-8", errors="ignore")
+    try:
+        return json.loads(b) if b else {}
+    except Exception:
+        return {}
+
+
+def _db():
+    return psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        port=os.environ.get("DB_PORT", "5432"),
+    )
+
+
+def _to_list(v):
+    # Normalize to list[str]
+    if not v:
+        return []
+    try:
+        return [str(x) for x in v]
+    except Exception:
+        return []
+
+
+def lambda_handler(event, context):
+    method = _method(event)
+
+    if method == "OPTIONS":
+        return {"statusCode": 204, "headers": _cors_headers(), "body": ""}
+
+    if method != "POST":
+        return _resp(405, {"error": "Method not allowed"})
+
+    data = _body(event)
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+
+    if not username or not password:
+        return _resp(400, {"error": "username and password are required"})
+
+    try:
+        conn = _db()
+        conn.autocommit = True
+        cur = conn.cursor()
+
+        # Fetch basic profile + lists in one go
+        cur.execute(
+            '''
+            SELECT username, password, name, surname, profile_pic, following, close_friends
+            FROM "User"
+            WHERE username=%s
+            LIMIT 1
+            ''',
+            (username,),
+        )
+        row = cur.fetchone()
+
+        if not row:
+            return _resp(401, {"error": "invalid credentials"})
+
+        db_username, db_password, name, surname, avatar, following, close_friends = row
+
+        # TEST-ONLY: plain-text compare
+        if password != (db_password or ""):
+            return _resp(401, {"error": "invalid credentials"})
+
+        session = {
+            "userId": f"user#{db_username}",
+            "username": db_username,
+            "displayName": (" ".join([name or "", surname or ""]).strip()) or db_username,
+            "avatar": avatar,
+            # ✅ include lists for client-side feeds
+            "followingList": _to_list(following),
+            "closeList": _to_list(close_friends),
+        }
+        return _resp(200, session)
+
+    except Exception as e:
+        return _resp(500, {"error": str(e)})

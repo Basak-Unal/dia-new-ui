@@ -1,0 +1,81 @@
+import json
+import psycopg2
+import os
+
+
+def lambda_handler(event, context):
+    """
+    AWS Lambda function to update a user's information in a PostgreSQL database.
+    """
+    try:
+        # Connect to DB
+        conn = psycopg2.connect(
+            host=os.environ['DB_HOST'],
+            dbname=os.environ['DB_NAME'],
+            user=os.environ['DB_USER'],
+            password=os.environ['DB_PASSWORD'],
+            port=os.environ['DB_PORT']
+        )
+        cursor = conn.cursor()
+
+        body = json.loads(event.get('body') or '{}')
+
+        # Mandatory: username
+        username = body.get('username')
+        if not username:
+            return {
+                'statusCode': 400,
+                'body': json.dumps({'error': 'Must provide username to update user.'})
+            }
+
+        # Allowed fields
+        updatable_fields = [
+            'password', 'profile_pic', 'bio', 'name', 'surname',
+            'followers', 'following', 'events_applied'
+        ]
+
+        fields = []
+        values = []
+
+        for field in updatable_fields:
+            if field in body:
+                value = body[field]
+                # Convert Python lists to JSON strings for jsonb columns
+                if field in ['followers', 'following', 'events_applied']:
+                    value = json.dumps(value)
+                fields.append(f"{field} = %s")
+                values.append(value)
+
+        if not fields:
+            return {
+                'statusCode': 400,
+                'body': json.dumps({'error': 'No fields to update provided.'})
+            }
+
+        # Build query (fix: quote the table name inside a single-quoted Python string)
+        set_clause = ", ".join(fields)
+        query = f'UPDATE "User" SET {set_clause} WHERE username = %s'
+        values.append(username)
+
+        cursor.execute(query, values)
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            return {
+                'statusCode': 404,
+                'body': json.dumps({'message': 'User not found.'})
+            }
+
+        cursor.close()
+        conn.close()
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({'message': 'User updated successfully.'})
+        }
+
+    except Exception as e:
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }

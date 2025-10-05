@@ -1,0 +1,97 @@
+import json
+import os
+import time
+from decimal import Decimal
+from typing import Any, Dict, List, Tuple
+import boto3
+
+# ---------- Dynamo config ----------
+DDB = boto3.client("dynamodb")
+TABLE_NAME = os.environ.get("TABLE_NAME", "dialife-activity")
+ATTR_PK_NAME = os.environ.get("ATTR_PK_NAME", "ActivityType")
+ATTR_SK_NAME = os.environ.get("ATTR_SK_NAME", "ValidUntill")
+
+
+def json_default(o):
+    if isinstance(o, Decimal):
+        return int(o) if o % 1 == 0 else float(o)
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+
+def response(status: int, body: Dict):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(body, default=json_default),
+    }
+
+
+def to_attr_val(v, is_sort_key=False):
+    if isinstance(v, (int, float, Decimal)):
+        return {"N": str(v)}
+    return {"S": str(v)}
+
+
+def from_item(item: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    out = {}
+    for k, v in item.items():
+        if "S" in v:
+            out[k] = v["S"]
+        elif "N" in v:
+            nv = v["N"]
+            try:
+                out[k] = int(nv)
+            except ValueError:
+                out[k] = float(nv)
+        elif "BOOL" in v:
+            out[k] = v["BOOL"]
+    return out
+
+
+def lambda_handler(event, context):
+    # ---------- Handle body safely ----------
+    body_raw = event.get("body", "{}")
+    if isinstance(body_raw, dict):
+        body = body_raw  # already parsed
+    else:
+        try:
+            body = json.loads(body_raw)
+        except json.JSONDecodeError:
+            return response(400, {"error": "Invalid JSON body"})
+
+    pairs = body.get("pairs", [])
+    if not isinstance(pairs, list) or not pairs:
+        return response(400, {"error": "Missing or invalid 'pairs'"})
+
+    print("[DEBUG] Pairs received:", pairs)
+
+    wanted_order: List[Tuple[str, str]] = [(str(pk), str(sk)) for pk, sk in pairs]
+    results_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    # Helper to split into chunks of 100 (DynamoDB limit)
+    def chunk(lst, size):
+        for i in range(0, len(lst), size):
+            yield lst[i:i+size]
+
+    for group in chunk(pairs, 100):
+        keys = [
+            {ATTR_PK_NAME: to_attr_val(pk), ATTR_SK_NAME: to_attr_val(sk, is_sort_key=True)}
+            for pk, sk in group
+        ]
+        request_items = {TABLE_NAME: {"Keys": keys}}
+        backoff = 0.2
+        while True:
+            resp = DDB.batch_get_item(RequestItems=request_items)
+            for item in resp.get("Responses", {}).get(TABLE_NAME, []):
+                obj = from_item(item)
+                key_pair = (str(obj.get(ATTR_PK_NAME)), str(obj.get(ATTR_SK_NAME)))
+                results_map[key_pair] = obj
+            unprocessed = resp.get("UnprocessedKeys", {})
+            if not unprocessed or not unprocessed.get(TABLE_NAME, {}).get("Keys"):
+                break
+            request_items = {"RequestItems": unprocessed}
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 2.0)
+
+    ordered_items = [results_map[k] for k in wanted_order if k in results_map]
+    return response(200, {"count": len(ordered_items), "items": ordered_items})

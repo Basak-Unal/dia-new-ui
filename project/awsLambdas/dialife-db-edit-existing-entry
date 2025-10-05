@@ -1,0 +1,38 @@
+import boto3
+import json
+from boto3.dynamodb.conditions import Key
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('dialife-piece-text')
+
+def lambda_handler(event, context):
+    """
+    This function updates one or more fields in an existing DynamoDB item.
+    *********
+    Arguments:
+    event: dict - should include 'body' with 'UserID', 'Timestamp', and 'UpdateFields' (dict) that contains ("the fielt to be modified" : "what it will be midified to") * however much
+    context: AWS Lambda context object (unused)
+    **********
+    Returns:
+    dict - JSON response with update confirmation, HTTP status code 200
+    """
+    body = json.loads(event['body'])
+    user_id = body['UserID']
+    timestamp = body['Timestamp']
+    updates = body['UpdateFields']
+
+    update_expression = 'SET ' + ', '.join(f"#{k} = :{k}" for k in updates)
+    expression_attribute_names = {f"#{k}": k for k in updates}
+    expression_attribute_values = {f":{k}": v for k, v in updates.items()}
+
+    table.update_item(
+        Key={'UserID': user_id, 'Timestamp': timestamp},
+        UpdateExpression=update_expression,
+        ExpressionAttributeNames=expression_attribute_names,
+        ExpressionAttributeValues=expression_attribute_values
+    )
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps({'message': 'Entry updated'})
+    }

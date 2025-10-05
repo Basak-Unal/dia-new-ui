@@ -1,0 +1,189 @@
+# lambda_function.py
+import json
+import os
+import logging
+import uuid
+from typing import Any, Dict
+
+import boto3
+from botocore.exceptions import ClientError
+
+log = logging.getLogger()
+log.setLevel(logging.INFO)
+
+# --- Environment configuration ---
+VERIFY_EXISTENCE  = os.environ.get("VERIFY_EXISTENCE", "false").lower() == "true"
+AUTO_GENERATE_ID  = os.environ.get("AUTO_GENERATE_ID", "true").lower() == "true"
+
+table = None
+
+def _res(code: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "statusCode": code,
+        "headers": {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+        },
+        "body": json.dumps(body, ensure_ascii=False),
+    }
+
+
+def _parse_body(event) -> Dict[str, Any] | None:
+    try:
+        b = event.get("body")
+        if isinstance(b, str):
+            return json.loads(b)
+        if isinstance(b, dict):
+            return b
+    except Exception:
+        return None
+    return None
+
+
+def _validate(p: Dict[str, Any]) -> str | None:
+    if not p:
+        return "Invalid JSON body"
+
+    if not isinstance(p.get("UserID"), str) or not p["UserID"]:
+        return "UserID is required (string)"
+    if not isinstance(p.get("Timestamp"), int) or not p["Timestamp"]:
+        return "Timestamp is required (string)"
+
+    if not isinstance(p.get("CommentUserID"), str) or not p["CommentUserID"]:
+        return "CommentUserID is required (string)"
+
+    # timestamp
+    try:
+        _ = int(p.get("CommentTimeStamp"))
+    except Exception:
+        return "CommentTimeStamp must be an integer epoch (ms)"
+
+    # text
+    txt = p.get("CommentTxt")
+    if not isinstance(txt, str):
+        return "CommentTxt must be a string"
+    if not txt.strip():
+        return "CommentTxt must not be empty"
+
+    # optional CommentId
+    if "CommentId" in p and (p["CommentId"] is None or str(p["CommentId"]).strip() == ""):
+        return "If provided, CommentId must be a non-empty string"
+
+    # optional Extra
+    if "Extra" in p and not isinstance(p["Extra"], dict):
+        return "Extra must be an object if provided"
+
+    return None
+
+
+def lambda_handler(event, context):
+    global table
+    try:
+        payload = _parse_body(event)
+        err = _validate(payload)
+
+
+        if "#" in payload["UserID"]:
+            TABLE_NAME        = "dialife-piece-text"
+            PARTITION_KEY     = os.environ.get("PARTITION_KEY", "UserID")   # your partition key attribute name
+            SORT_KEY          = os.environ.get("SORT_KEY", "Timestamp")        # your sort key attribute name
+            public_post = False
+        else:
+            TABLE_NAME        = "dialife-curated-public-feed"
+            PARTITION_KEY     = os.environ.get("PARTITION_KEY", "BatchID")   # your partition key attribute name
+            SORT_KEY          = os.environ.get("SORT_KEY", "Rank")        # your sort key attribute name
+            public_post = True
+
+        dynamodb = boto3.resource("dynamodb")
+        table = dynamodb.Table(TABLE_NAME) if TABLE_NAME else None
+
+        if err:
+            return _res(400, {"error": err})
+
+        if not public_post:
+            UserID_val = payload["UserID"]
+            Timestamp_val = payload["Timestamp"]
+        else:
+            UserID_val = payload["BatchId"]
+            Timestamp_val = payload["Rank"]
+
+        # finalize comment fields
+        comment_id = payload.get("CommentId")
+        if not comment_id and AUTO_GENERATE_ID:
+            comment_id = str(uuid.uuid4())
+
+        comment_map = {
+            "CommentId": comment_id if comment_id else None,
+            "UserID": payload["CommentUserID"],
+            "Timestamp": int(payload["CommentTimeStamp"]),
+            "Txt": payload["CommentTxt"].strip(),
+        }
+        if "Extra" in payload and payload["Extra"]:
+            comment_map["extra"] = payload["Extra"]
+
+        # remove None-valued commentId key if we didn't set one
+        if comment_map.get("CommentId") is None:
+            del comment_map["CommentId"]
+
+        # (optional) ensure the post exists
+        if VERIFY_EXISTENCE:
+            try:
+                existing = table.get_item(
+                    Key={PARTITION_KEY: UserID_val, SORT_KEY: Timestamp_val},
+                    ProjectionExpression=f"{PARTITION_KEY}, {SORT_KEY}",
+                ).get("Item")
+            except ClientError as e:
+                log.error("GetItem failed: %s", e)
+                return _res(500, {"error": "Internal error"})
+            if not existing:
+                return _res(404, {"error": "Post not found"})
+
+        # Build UpdateItem params
+        # Always: append comment + increment CommentCount
+        update_expr = (
+            "SET Comments = list_append(if_not_exists(Comments, :empty), :newc), "
+            "CommentCount = if_not_exists(CommentCount, :zero) + :one"
+        )
+        expr_vals = {
+            ":empty": [],
+            ":newc": [comment_map],
+            ":zero": 0,
+            ":one": 1,
+        }
+
+        params: Dict[str, Any] = {
+            "TableName": TABLE_NAME,
+            "Key": {PARTITION_KEY: UserID_val, SORT_KEY: Timestamp_val},
+            "UpdateExpression": update_expr,
+            "ReturnValues": "NONE",
+        }
+
+        # If CommentId present => add to CommentIds set & block duplicates
+        if comment_id:
+            params["UpdateExpression"] += " ADD CommentIds :cidset"
+            params["ConditionExpression"] = "attribute_not_exists(CommentIds) OR NOT contains(CommentIds, :cid)"
+            expr_vals[":cid"] = str(comment_id)
+            expr_vals[":cidset"] = {str(comment_id)}  # translates to String Set (SS)
+
+        params["ExpressionAttributeValues"] = expr_vals
+
+        table.update_item(**params)
+
+        return _res(
+            200,
+            {
+                "ok": True,
+                "UserID": UserID_val,
+                "Timestamp": Timestamp_val,
+                "CommentId": comment_id,  # may be None if you disabled AUTO_GENERATE_ID and didn't send it
+            },
+        )
+
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+            return _res(409, {"error": "Duplicate CommentId for this post"})
+        log.exception("DynamoDB error")
+        return _res(500, {"error": "Internal error"})
+    except Exception:
+        log.exception("Unhandled error")
+        return _res(500, {"error": "Internal error"})

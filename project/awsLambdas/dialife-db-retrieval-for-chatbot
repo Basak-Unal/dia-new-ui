@@ -1,0 +1,459 @@
+import os
+import json
+import random
+from array import array
+import heapq
+import itertools
+import boto3
+import psycopg2
+import numpy as np
+from boto3.dynamodb.conditions import Key, Attr
+from boto3.dynamodb.types import Binary
+
+lambda_client = boto3.client('lambda')
+
+# ========================
+# CONFIG / ENV
+# ========================
+BEDROCK_REGION   = os.environ.get("BEDROCK_REGION", "eu-central-1")
+EMBED_MODEL_ID   = os.environ.get("EMBED_MODEL_ID", "amazon.titan-embed-text-v2:0")
+DDB_TABLE_NAME   = os.environ.get("DDB_TABLE_NAME", "dialife-piece-text")
+
+# Tags catalog (same table your "add tag" Lambda writes to)
+TAGS_TABLE_NAME  = os.environ.get("TAGS_TABLE", "dialife-tag-categories")
+TAG_TOP_K        = int(os.environ.get("TAG_TOP_K", "3"))        # how many tags to try
+TAG_MIN_SIM      = float(os.environ.get("TAG_MIN_SIM", "0.35")) # min cosine to accept a tag
+TAG_EMBED_DIM    = int(os.environ.get("TAG_EMBED_DIM", "256"))  # must match how you embed tags
+
+# RDS (Postgres)
+PG_HOST = os.environ["PG_HOST"]
+PG_PORT = os.environ["PG_PORT"]
+PG_DB   = os.environ["PG_DB"]
+PG_USER = os.environ["PG_USER"]
+PG_PASS = os.environ["PG_PASS"]
+
+# Retrieval knobs
+TOP_K = int(os.environ.get("TOP_K", "5"))
+BATCH_LIMIT = int(os.environ.get("BATCH_LIMIT", "5"))             # items per DDB page
+MAX_FRIEND_BATCHES = int(os.environ.get("MAX_FRIEND_BATCHES", "5"))
+MAX_PHASE_A_BATCHES = int(os.environ.get("MAX_PHASE_A_BATCHES", "2"))  # user’s private batches
+
+# Privacy mapping
+PRIV = {
+    "PRIVATE": 3,
+    "CLOSE_FRIENDS": 2,
+    "FRIENDS": 1,
+    "PUBLIC": 0,
+}
+
+# ========================
+# CLIENTS
+# ========================
+dynamodb = boto3.resource("dynamodb")
+table = dynamodb.Table(DDB_TABLE_NAME)
+tags_table = boto3.resource("dynamodb").Table(TAGS_TABLE_NAME)
+bedrock = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
+
+# ========================
+# HELPERS
+# ========================
+def _ok(payload, status=200):
+    return {"statusCode": status, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps(payload, default=str)}
+
+def _bad(msg, details=None, status=400):
+    body = {"error": msg}
+    if details:
+        body["details"] = details
+    return _ok(body, status=status)
+
+def embed_text(text: str) -> np.ndarray:
+    # IMPORTANT: use the same dim you used when storing post/tag embeddings
+    body = json.dumps({
+        "inputText": text,
+        "dimensions": TAG_EMBED_DIM
+    })
+    resp = bedrock.invoke_model(modelId=EMBED_MODEL_ID, body=body)
+    payload = json.loads(resp["body"].read())
+    return np.array(payload["embedding"], dtype=np.float32)
+
+def cosine(a: np.ndarray, b: np.ndarray) -> float:
+    denom = (np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+def pk(user_id: str, privacy_int: int) -> str:
+    return f"{user_id}#{privacy_int}"
+
+def decode_owner_and_privacy(user_pk: str):
+    if "#" in user_pk:
+        owner, priv = user_pk.split("#", 1)
+        try:
+            return owner, int(priv)
+        except:
+            return user_pk, None
+    return user_pk, None
+
+def connect_pg():
+    return psycopg2.connect(
+        host=PG_HOST, port=PG_PORT, dbname=PG_DB,
+        user=PG_USER, password=PG_PASS, connect_timeout=5
+    )
+
+def get_social_lists(user_name: str):
+    """
+    Fetch following and close_friends JSONB arrays (of usernames) from Postgres.
+    """
+    sql = """
+        SELECT following, close_friends
+        FROM "User"
+        WHERE username = %s
+        LIMIT 1
+    """
+    with connect_pg() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (user_name,))
+            row = cur.fetchone()
+            if not row:
+                return [], []
+            following, close_friends = row
+
+            def _ensure_list(x):
+                if x is None:
+                    return []
+                if isinstance(x, (list, tuple)):
+                    return list(x)
+                if isinstance(x, str):
+                    try:
+                        return json.loads(x)
+                    except Exception:
+                        return [x]
+                return [str(x)]
+
+            return _ensure_list(following), _ensure_list(close_friends)
+
+def _decode_embedding_field(emb_value):
+    """
+    Robust decode for EmbeddingB stored as Binary/bytes/bytearray/list[float].
+    Returns numpy.float32 vector or None if undecodable.
+    """
+    if emb_value is None:
+        return None
+    raw = None
+    if hasattr(emb_value, 'value') and isinstance(emb_value.value, bytes):
+        raw = emb_value.value
+    elif isinstance(emb_value, (bytes, bytearray)):
+        raw = emb_value
+    elif isinstance(emb_value, list):
+        try:
+            return np.array(emb_value, dtype=np.float32)
+        except Exception:
+            return None
+    else:
+        return None
+
+    buf = array("f")
+    try:
+        buf.frombytes(raw)
+    except Exception:
+        return None
+    return np.array(buf, dtype=np.float32)
+
+# ---------- TAG PICKING (query -> top tags) ----------
+def _load_all_tags():
+    """
+    Scan the tags catalog for SK='META' rows and return a list of items with EmbeddingB.
+    For small/medium tag catalogs a scan is fine. If it grows large, add a GSI or key design.
+    """
+    items = []
+    start_key = None
+    while True:
+        kwargs = {
+            "FilterExpression": Attr("SK").eq("META"),
+            "ProjectionExpression": "PK, TagName, EmbeddingB, Dim"
+        }
+        if start_key:
+            kwargs["ExclusiveStartKey"] = start_key
+        resp = tags_table.scan(**kwargs)
+        items.extend(resp.get("Items", []))
+        start_key = resp.get("LastEvaluatedKey")
+        if not start_key:
+            break
+    return items
+
+def _pick_query_tags(query_vec: np.ndarray) -> list[str]:
+    """
+    Compare query embedding with tag embeddings; return top-N tag names above threshold.
+    """
+    tag_items = _load_all_tags()
+    scored = []
+    for it in tag_items:
+        name = it.get("TagName") or it.get("PK")
+        if isinstance(name, str) and name.startswith("TAG#"):
+            name = name[4:]
+
+        tag_emb = _decode_embedding_field(it.get("EmbeddingB"))
+        if tag_emb is None or len(tag_emb) != len(query_vec):
+            continue
+
+        s = cosine(query_vec, tag_emb)
+        if s >= TAG_MIN_SIM:
+            scored.append((s, name))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [name for _, name in scored[:TAG_TOP_K]]
+
+# ---------- DDB Query with optional tag filter ----------
+def _query_ddb_partition(user_pk: str, limit: int, last_key=None,
+                         newest_first=True, match_tags: list[str] | None = None):
+    kwargs = {
+        "KeyConditionExpression": Key("UserID").eq(user_pk),
+        "Limit": limit,
+        "ScanIndexForward": not newest_first  # False => newest-first
+    }
+
+    # If we have tags to match, use a FilterExpression: contains(Tags, t1) OR contains(Tags, t2) ...
+    # NOTE: FilterExpression filters AFTER read; the Limit applies before filtering.
+    # Our outer loops keep paging until we accumulate enough matched items or hit batch caps.
+    if match_tags:
+        fe = None
+        for t in match_tags:
+            expr = Attr("Tags").contains(t)
+            fe = expr if fe is None else (fe | expr)
+        kwargs["FilterExpression"] = fe
+
+    if last_key:
+        kwargs["ExclusiveStartKey"] = last_key
+
+    resp = table.query(**kwargs)
+    return resp.get("Items", []), resp.get("LastEvaluatedKey")
+
+def _score_batch(items, query_vec):
+    out = []
+    for it in items:
+        emb_vec = _decode_embedding_field(it.get("EmbeddingB"))
+        if emb_vec is None:
+            continue
+        out.append((cosine(query_vec, emb_vec), it))
+    return out
+
+_counter = itertools.count()
+def push_topk(heap, score, item, k):
+    # (score, seq, item) to keep heap order stable on ties
+    if len(heap) < k:
+        heapq.heappush(heap, (score, next(_counter), item))
+    else:
+        if score > heap[0][0]:
+            heapq.heapreplace(heap, (score, next(_counter), item))
+
+def heap_to_sorted_list(heap):
+    return sorted(heap, key=lambda x: x[0], reverse=True)
+
+# ========================
+# LAMBDA HANDLER
+# ========================
+def lambda_handler(event, context):
+    try:
+        body = json.loads(event.get("body", "{}"))
+    except Exception as e:
+        return _bad("Invalid JSON body", str(e))
+
+    user_name = body.get("UserID") or body.get("username")
+    query_text = body.get("query")
+    k = int(body.get("k", TOP_K))
+
+    if not user_name or not query_text:
+        return _bad("Missing required fields", {"required": ["UserID (username)", "query"]})
+
+    # 1) Embed the query
+    try:
+        query_vec = embed_text(query_text)
+    except Exception as e:
+        return _bad("Embedding failed", str(e), status=500)
+
+    # 2) Pick top tag(s) for the query
+    try:
+        chosen_tags = _pick_query_tags(query_vec)
+    except Exception as e:
+        chosen_tags = []
+    # Fallback: if no tags matched, we’ll still fetch recent items like before.
+    use_tag_filter = len(chosen_tags) > 0
+
+    topk_heap = []
+
+    # ----------------------
+    # Phase A: user's private posts (limited batches), with tag filter if available
+    # ----------------------
+    phase_a_partitions = [pk(user_name, PRIV["PRIVATE"])]
+    for part in phase_a_partitions:
+        last_key = None
+        batches_seen = 0
+
+        while batches_seen < MAX_PHASE_A_BATCHES:
+            try:
+                items, last_key = _query_ddb_partition(
+                    user_pk=part,
+                    limit=BATCH_LIMIT,
+                    last_key=last_key,
+                    newest_first=True,
+                    match_tags=chosen_tags if use_tag_filter else None
+                )
+            except Exception:
+                break
+
+            if not items:
+                batches_seen += 1  # still counts as an attempt
+                if not last_key:
+                    break
+                else:
+                    continue
+
+            scored = _score_batch(items, query_vec)
+            for sc, it in scored:
+                push_topk(topk_heap, sc, it, k)
+
+            batches_seen += 1
+            if not last_key:
+                break
+
+    # ----------------------
+    # Phase B: randomized shared + friends + close friends (tag-filtered)
+    # ----------------------
+    phase_b_partitions = []
+
+    # User's shared posts
+    phase_b_partitions.extend([
+        pk(user_name, PRIV["CLOSE_FRIENDS"]),
+        pk(user_name, PRIV["FRIENDS"]),
+        pk(user_name, PRIV["PUBLIC"]),
+    ])
+
+    # Friends & close friends
+    try:
+        friends, close_friends = get_social_lists(user_name)
+    except Exception:
+        friends, close_friends = [], []
+
+    random.shuffle(friends)
+    random.shuffle(close_friends)
+
+    for uid in close_friends:
+        phase_b_partitions.extend([
+            pk(uid, PRIV["CLOSE_FRIENDS"]),
+            pk(uid, PRIV["FRIENDS"]),
+            pk(uid, PRIV["PUBLIC"])
+        ])
+
+    for uid in friends:
+        phase_b_partitions.extend([
+            pk(uid, PRIV["FRIENDS"]),
+            pk(uid, PRIV["PUBLIC"])
+        ])
+
+    random.shuffle(phase_b_partitions)
+
+    # Fetch & score phase B (respect privacy; apply tag filter if available)
+    for part in phase_b_partitions:
+        if len(topk_heap) >= k:
+            break
+
+        last_key = None
+        batches_seen = 0
+
+        while len(topk_heap) < k and batches_seen < MAX_FRIEND_BATCHES:
+            try:
+                items, last_key = _query_ddb_partition(
+                    user_pk=part,
+                    limit=BATCH_LIMIT,
+                    last_key=last_key,
+                    newest_first=bool(random.getrandbits(1)),
+                    match_tags=chosen_tags if use_tag_filter else None
+                )
+            except Exception:
+                break
+
+            if not items:
+                batches_seen += 1
+                if not last_key:
+                    break
+                else:
+                    continue
+
+            # --- STRICT PRIVACY ENFORCEMENT ---
+            filtered_items = []
+            for item in items:
+                owner, privacy_int = decode_owner_and_privacy(item.get("UserID", ""))
+                # Skip others' private posts
+                if privacy_int == PRIV["PRIVATE"] and owner != user_name:
+                    continue
+                # Skip close_friends posts if user not in owner's close_friends
+                if privacy_int == PRIV["CLOSE_FRIENDS"] and owner != user_name:
+                    try:
+                        _, owner_close_friends = get_social_lists(owner)
+                    except Exception:
+                        owner_close_friends = []
+                    if user_name not in owner_close_friends:
+                        continue
+                filtered_items.append(item)
+            # -----------------------------------
+
+            scored = _score_batch(filtered_items, query_vec)
+            for sc, it in scored:
+                push_topk(topk_heap, sc, it, k)
+
+            batches_seen += 1
+            if not last_key:
+                break
+
+        if len(topk_heap) >= k:
+            break
+
+    # ----------------------
+    # Return top-k and call LLM
+    # ----------------------
+    top_sorted = heap_to_sorted_list(topk_heap)
+    results = []
+    for score, _, item in top_sorted:
+        owner, privacy_int = decode_owner_and_privacy(item.get("UserID", ""))
+        results.append({
+            "Txt": item.get("Txt"),
+            "Score": round(float(score), 6),
+            "Owner": owner,
+            "PrivacyInt": privacy_int,
+            "Timestamp": item.get("Timestamp"),
+            "Tags": item.get("Tags", [])
+        })
+
+    # Prompt to inference Lambda
+    tags_str = ", ".join(chosen_tags) if use_tag_filter else "none"
+    context_snippets = ", ".join([f'"{res.get("Txt","")}" (Score: {res.get("Score",0):.2f})' for res in results])
+
+    prompt = f"""
+You are a supportive assistant that provides concise (≤50 words), uplifting, and practical answers about living with diabetes.
+A user question is given to you and you act as the user's personal assistant.
+User question which you should answer right now: {query_text}  End of the user question you should answer.
+User had the following thoughts about similar topics, keep these in mind for a more personalized answer: {context_snippets}
+"""
+    print(context_snippets)
+
+    payload_data = {"prompt": prompt}
+    event_payload_for_inference = {"body": json.dumps(payload_data)}
+    json_payload = json.dumps(event_payload_for_inference)
+
+    response = lambda_client.invoke(
+        FunctionName='dialife-inference-to-llm',
+        InvocationType='RequestResponse',
+        Payload=json_payload
+    )
+
+    response_payload = json.loads(response["Payload"].read())
+    final_output_dict = json.loads(response_payload.get("body", "{}"))
+    response_text = final_output_dict.get("output", "AI response could not be generated.")
+
+    return _ok({
+        "Status Code": response_payload.get("statusCode"),
+        "ChosenTags": chosen_tags,
+        "Response": response_text,
+        "results": results
+    })

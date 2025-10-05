@@ -1,0 +1,189 @@
+import json
+import os
+import time
+from decimal import Decimal
+from typing import List, Tuple, Any, Dict
+
+import boto3
+import psycopg2
+import psycopg2.extras
+
+# ---------- Dynamo config ----------
+DDB = boto3.client("dynamodb")
+TABLE_NAME = os.environ.get("TABLE_NAME", "dialife-activity")
+ATTR_PK_NAME = os.environ.get("ATTR_PK_NAME", "ActivityType")  # e.g., "PK" or "id" or "UserID"
+ATTR_SK_NAME = os.environ.get("ATTR_SK_NAME", "ValidUntill")  # e.g., "SK" or "PostID"
+
+# ---------- Postgres config ----------
+PG_HOST = os.environ.get("PG_HOST")
+PG_PORT = int(os.environ.get("PG_PORT", "5432"))
+PG_DB   = os.environ.get("PG_DATABASE")
+PG_USER = os.environ.get("PG_USER")
+PG_PASS = os.environ.get("PG_PASSWORD")
+
+# Either provide a FULL query via PG_KEYS_QUERY (with a single %s param for username),
+# or set PG_TABLE / PG_USER_COL / PG_PK_COL / PG_SK_COL and we'll build the query.
+PG_KEYS_QUERY = os.environ.get("PG_KEYS_QUERY")  # optional
+PG_TABLE      = os.environ.get("PG_TABLE", "User")
+PG_USER_COL   = os.environ.get("PG_USER_COL", "username")
+PG_PK_COL     = os.environ.get("PG_PK_COL", "pk")
+PG_SK_COL     = os.environ.get("PG_SK_COL", "sk")
+
+# Optional cap (to avoid huge BatchGet calls)
+MAX_KEYS = int(os.environ.get("MAX_KEYS", "500"))
+
+
+# ------------------ Helpers ------------------------
+def cors_headers():
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Methods": "OPTIONS,POST",
+    }
+
+def json_default(o):
+    if isinstance(o, Decimal):
+        return int(o) if o % 1 == 0 else float(o)
+    raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+
+def response(status: int, body: Dict):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json", **cors_headers()},
+        "body": json.dumps(body, default=json_default),
+    }
+
+def to_attr_val(v):
+    """Minimal marshaler for PK/SK (assumed strings or numbers)."""
+    if isinstance(v, bool):
+        return {"BOOL": v}
+    if isinstance(v, (int, float, Decimal)):
+        return {"N": str(v)}
+    return {"S": str(v)}
+
+def from_item(item: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Shallow unmarshaller for common DynamoDB attr types."""
+    out = {}
+    for k, v in item.items():
+        if "S" in v:
+            out[k] = v["S"]
+        elif "N" in v:
+            nv = v["N"]
+            try:
+                out[k] = int(nv)
+            except ValueError:
+                out[k] = float(nv)
+        elif "BOOL" in v:
+            out[k] = v["BOOL"]
+        elif "M" in v:
+            out[k] = {ik: (iv.get("S") or iv.get("N") or iv.get("BOOL")) for ik, iv in v["M"].items()}
+        elif "L" in v:
+            out[k] = [iv.get("S") or iv.get("N") or iv.get("BOOL") for iv in v["L"]]
+        else:
+            out[k] = v
+    return out
+
+
+# Shall be completed
+def getVals_from_pg(username: str) -> List[List[Any]]:
+    """Return [[pk, sk], ...] from Postgres for the given username."""
+
+    conn = None
+    rows = []
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            dbname=PG_DB,
+            user=PG_USER,
+            password=PG_PASS,
+            connect_timeout=5,
+        )
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if PG_KEYS_QUERY:
+                # User provided a custom query, must have a single %s for username
+                cur.execute(PG_KEYS_QUERY, (username,))
+            else:
+                # Build default query from environment vars
+                query = f"""
+                    SELECT {PG_PK_COL}, {PG_SK_COL}
+                    FROM {PG_TABLE}
+                    WHERE {PG_USER_COL} = %s
+                    LIMIT %s
+                """
+                cur.execute(query, (username, MAX_KEYS))
+
+            for row in cur.fetchall():
+                rows.append([row[PG_PK_COL], row[PG_SK_COL]])
+
+    finally:
+        if conn:
+            conn.close()
+
+    return rows
+
+
+
+# ------------------ Lambda ------------------------
+def lambda_handler(event, context):
+    # CORS preflight
+    if event.get("httpMethod") == "OPTIONS":
+        return response(200, {"ok": True})
+
+    # Parse body
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return response(400, {"error": "Invalid JSON body."})
+
+    username = body.get("UserID")
+    if not isinstance(username, str) or not username.strip():
+        return response(400, {"error": "Missing or invalid 'UserID'."})
+    username = username.strip()
+
+    # 1) Fetch [[pk, sk], ...] from Postgres
+    try:
+        pairs = getVals_from_pg(username)
+    except Exception as e:
+        return response(500, {"error": f"Postgres query failed: {e}"})
+
+    if not pairs:
+        return response(200, {"count": 0, "items": []})
+
+    # 2) BatchGet from DynamoDB in chunks of 100, retry UnprocessedKeys
+    wanted_order: List[Tuple[str, str]] = [(str(pk), str(sk)) for pk, sk in pairs]
+
+    def chunk(lst, size):
+        for i in range(0, len(lst), size):
+            yield lst[i:i+size]
+
+    results_map: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    for group in chunk(pairs, 100):
+        keys = [{ATTR_PK_NAME: to_attr_val(pk), ATTR_SK_NAME: to_attr_val(sk)} for pk, sk in group]
+        request_items = {TABLE_NAME: {"Keys": keys}}
+
+        backoff = 0.2
+        while True:
+            resp = DDB.batch_get_item(RequestItems=request_items)
+            for item in resp.get("Responses", {}).get(TABLE_NAME, []):
+                obj = from_item(item)
+                key_pair = (str(obj.get(ATTR_PK_NAME)), str(obj.get(ATTR_SK_NAME)))
+                results_map[key_pair] = obj
+
+            unprocessed = resp.get("UnprocessedKeys", {})
+            if not unprocessed or not unprocessed.get(TABLE_NAME, {}).get("Keys"):
+                break
+
+            # Retry with backoff for unprocessed keys
+            request_items = {"RequestItems": unprocessed} if "RequestItems" in unprocessed else unprocessed
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 2.0)
+
+    # 3) Preserve order; omit missing (or replace with None if you prefer)
+    ordered_items = [results_map[k] for k in wanted_order if k in results_map]
+
+    return response(200, {
+        "count": len(ordered_items),
+        "items": ordered_items
+    })

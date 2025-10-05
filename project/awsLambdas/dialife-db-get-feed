@@ -1,0 +1,243 @@
+import os
+import json
+import boto3
+import random
+from boto3.dynamodb.conditions import Key, Attr
+
+dynamodb = boto3.resource("dynamodb")
+entries_tbl = dynamodb.Table("dialife-piece-text")
+GSI_PRIVACY_TS = os.environ.get("GSI_PRIVACY_TS", "GSI_PrivacyTimestamp")
+ENV_FOLLOWING_CSV = os.environ.get("FOLLOWING_IDS_CSV", "")
+ENV_CLOSE_CSV = os.environ.get("CLOSE_IDS_CSV", "")
+
+PUBLIC_PAGE_SIZE = int(os.environ.get("PUBLIC_PAGE_SIZE", 10))
+PUBLIC_OVERSAMPLE = int(os.environ.get("PUBLIC_OVERSAMPLE", 300))  # scan this many, then sample
+SCAN_TOTAL_SEGMENTS = int(os.environ.get("SCAN_TOTAL_SEGMENTS", "8"))  # parallel scan segments
+
+
+# ----- helpers -----
+
+def pk(user_id: str, privacy: int) -> str:
+    return f"{user_id}#{privacy}"
+
+def _to_int(v, default=None):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+CURATED_BATCH_ID = "1"
+
+def _parse_ids(val, env_csv=""):
+    if isinstance(val, list):
+        return [str(x) for x in val]
+    if isinstance(val, str) and val.strip():
+        return [s.strip() for s in val.split(",") if s.strip()]
+    if env_csv:
+        return [s.strip() for s in env_csv.split(",") if s.strip()]
+    return []
+
+def _project_expr():
+    return "UserID, #ts, Privacy, Txt, Tags, Links, History, Comments"
+
+def _project_public_expr():
+    return "BatchId, Rank, UserID, #ts, Privacy, Txt, Tags, Links, History, Comments"
+
+def _expr_names():
+    return {"#ts": "Timestamp"}
+
+from decimal import Decimal
+
+def _dec_to_native(x):
+    # Convert Decimal to int if it's an integer value, else to float
+    if isinstance(x, Decimal):
+        return int(x) if x % 1 == 0 else float(x)
+    return x
+
+def _convert(obj):
+    # Recursively convert Decimals inside dicts/lists
+    if isinstance(obj, dict):
+        return {k: _convert(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_convert(v) for v in obj]
+    return _dec_to_native(obj)
+
+def _ok(feeds, next_private_after=None):
+    body = {"feeds": _convert(feeds)}
+    if next_private_after is not None:
+        body["next_private_after"] = _dec_to_native(next_private_after)
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(body)
+    }
+
+def _bad(msg):
+    return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"error": msg})}
+
+# ----- feed fetchers -----
+
+def fetch_private(user_id, after_ts=None, limit=10):
+    if not user_id:
+        return [], None
+
+    key_cond = Key("UserID").eq(pk(user_id, 3))
+    if after_ts is not None:
+        key_cond = key_cond & Key("Timestamp").lt(after_ts)
+
+    print(f"[DEBUG] Fetching private feed for {user_id} with PK={pk(user_id,3)}, after_ts={after_ts}")
+
+    resp = entries_tbl.query(
+        KeyConditionExpression=key_cond,
+        ProjectionExpression=_project_expr(),
+        ExpressionAttributeNames=_expr_names(),
+        ScanIndexForward=False,
+        Limit=limit
+    )
+    items = resp.get("Items", [])
+    print(f"[DEBUG] Private query returned {len(items)} items")
+    if items:
+        print(f"[DEBUG] First private item: {items[0]}")
+    next_after = items[-1]["Timestamp"] if len(items) == limit else None
+    return items, next_after
+
+def fetch_multi(ids, allowed_privacy, chunk_index=0, limit=20, per_user_cap=7, start_index=None):
+    if not ids:
+        print("[DEBUG] fetch_multi called with no IDs")
+        return [], 0
+
+    if start_index is not None:
+        ids = ids[start_index:] + ids[:start_index]
+
+    buf = []
+    searchedIDs = 0
+    for uid in ids:
+        if len(buf) >= limit:
+            break
+        searchedIDs += 1
+        print(f"[DEBUG] Querying multi feed: uid={uid}, privacy={allowed_privacy}")
+        resp = entries_tbl.query(
+            KeyConditionExpression=Key("UserID").eq(pk(uid, allowed_privacy)),
+            ProjectionExpression=_project_expr(),
+            ExpressionAttributeNames=_expr_names(),
+            ScanIndexForward=False,
+            Limit=per_user_cap
+        )
+        items = resp.get("Items", [])
+        print(f"[DEBUG] Got {len(items)} items for {uid}#{allowed_privacy}")
+        buf.extend(items)
+
+    buf.sort(key=lambda x: x.get("Timestamp", 0), reverse=True)
+    return buf, searchedIDs
+
+def fetch_public(chunk_index=1, oversample=PUBLIC_OVERSAMPLE):
+    """
+    Randomized public feed for tiny tables (no curated table).
+    - No parallel segments (stable for small datasets)
+    - Accepts either 'Privacy' or 'privacy' attribute = 0
+    """
+    # 1) Scan without segments
+    try:
+        resp = entries_tbl.scan(
+            # Accept Privacy==0 OR privacy==0
+            FilterExpression=(Attr("Privacy").eq(0)) | (Attr("privacy").eq(0)),
+            ProjectionExpression=_project_expr(),
+            ExpressionAttributeNames=_expr_names(),
+            Limit=max(oversample, PUBLIC_PAGE_SIZE)  # ensure we at least read >= page size
+        )
+    except Exception as e:
+        print(f"[ERROR] Public scan failed: {e}")
+        return []
+
+    items = resp.get("Items", [])
+    print(f"[DEBUG] Public scan returned {len(items)} items pre-shuffle")
+    print(items)
+
+    if not items:
+        return []
+
+    # 2) Shuffle to randomize, then prefer recent ones so it doesn't look chaotic
+    #random.shuffle(items)
+    slice_for_sort = items[(PUBLIC_PAGE_SIZE * chunk_index): (PUBLIC_PAGE_SIZE * (chunk_index + 1))]
+    slice_for_sort.sort(key=lambda x: x.get("Timestamp", 0), reverse=True)
+
+    return slice_for_sort
+
+# ----- handler -----
+
+def lambda_handler(event, context):
+    try:
+        print(f"[DEBUG] Incoming event: {json.dumps(event)[:500]}")
+        q = event.get("queryStringParameters") or {}
+        body = event.get("body")
+        if body and isinstance(body, str):
+            try:
+                qb = json.loads(body)
+                if isinstance(qb, dict):
+                    q.update(qb)
+            except json.JSONDecodeError:
+                pass
+
+        user_id = q.get("user_id")
+        mask = _to_int(q.get("mask"), 0)
+        print(f"[DEBUG] Decoded inputs: user_id={user_id}, mask={mask}, params={q}")
+
+        if mask is None or mask < 0 or mask > 15:
+            return _bad("mask must be an integer between 0 and 15")
+
+        private_after = _to_int(q.get("private_after"), None)
+        public_page = _to_int(q.get("public_page"), 0)
+        followers_page = _to_int(q.get("followers_page"), 0)
+        close_page = _to_int(q.get("close_page"), 0)
+
+        following_ids = _parse_ids(q.get("following_ids"), ENV_FOLLOWING_CSV)
+        close_ids = _parse_ids(q.get("close_ids"), ENV_CLOSE_CSV)
+
+        want_public    = 1 if (mask & 0b0001) else 0
+        want_followers = 1 if (mask & 0b0010) else 0
+        want_close     = 1 if (mask & 0b0100) else 0
+        want_private   = 1 if (mask & 0b1000) else 0
+        print(f"[DEBUG] Feed mask decoded -> public={want_public}, followers={want_followers}, close={want_close}, private={want_private}")
+
+        feeds = [[], [], [], []]
+        next_private_cursor = None
+
+        if want_public:
+            try:
+                feeds[0] = fetch_public(chunk_index=public_page)
+            except Exception as e:
+                print(f"[ERROR] Public feed fetch failed: {e}")
+                feeds[0] = []
+
+        if want_followers:
+            try:
+                feeds[1], _ = fetch_multi(following_ids, allowed_privacy=1, chunk_index=followers_page)
+            except Exception as e:
+                print(f"[ERROR] Followers feed fetch failed: {e}")
+                feeds[1] = []
+
+        if want_close:
+            try:
+                feeds[2], _ = fetch_multi(close_ids, allowed_privacy=2, chunk_index=close_page)
+            except Exception as e:
+                print(f"[ERROR] Close friends feed fetch failed: {e}")
+                feeds[2] = []
+
+        if want_private:
+            if not user_id:
+                return _bad("user_id is required when requesting private feed (bit 3).")
+            try:
+                feeds[3], next_private_cursor = fetch_private(user_id, after_ts=private_after, limit=10)
+            except Exception as e:
+                print(f"[ERROR] Private feed fetch failed: {e}")
+                feeds[3], next_private_cursor = [], None
+
+        print(f"[DEBUG] Final feeds summary: public={len(feeds[0])}, followers={len(feeds[1])}, close={len(feeds[2])}, private={len(feeds[3])}")
+
+        return _ok(feeds, next_private_after=next_private_cursor)
+
+    except Exception as e:
+        print(f"[FATAL] Lambda crashed: {e}")
+        return {"statusCode": 500, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"error": f"Internal error: {str(e)}"})}

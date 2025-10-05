@@ -1,0 +1,220 @@
+import os
+import json
+from decimal import Decimal
+
+import boto3
+from boto3.dynamodb.conditions import Key
+
+import psycopg2
+import psycopg2.extras
+
+# ---------- Config ----------
+DDB_TABLE_NAME = os.environ.get("DDB_TABLE_NAME", "dialife-piece-text")
+PAGE_SIZE = int(os.environ.get("PAGE_SIZE", "10"))
+PER_USER_CAP = int(os.environ.get("PER_USER_CAP", "7"))  # cap per author per fetch
+
+# RDS envs
+DB_HOST = os.environ["DB_HOST"]
+DB_PORT = int(os.environ.get("DB_PORT", 5432))
+DB_NAME = os.environ["DB_NAME"]
+DB_USER = os.environ["DB_USER"]
+DB_PASSWORD = os.environ["DB_PASSWORD"]
+
+# ---------- Clients ----------
+dynamodb = boto3.resource("dynamodb")
+entries_tbl = dynamodb.Table(DDB_TABLE_NAME)
+
+# ---------- Helpers ----------
+def _connect_rds():
+    return psycopg2.connect(
+        host=DB_HOST,
+        port=DB_PORT,
+        dbname=DB_NAME,
+        user=DB_USER,
+        password=DB_PASSWORD,
+        connect_timeout=5
+    )
+
+def _to_int(v, default=None):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+def _expr_names():
+    return {"#ts": "Timestamp"}
+
+def _project_expr():
+    return "UserID, #ts, Privacy, Txt, Tags, Links"
+
+def _dec_to_native(x):
+    if isinstance(x, Decimal):
+        return int(x) if x % 1 == 0 else float(x)
+    return x
+
+def _convert(obj):
+    if isinstance(obj, dict):
+        return {k: _convert(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_convert(v) for v in obj]
+    return _dec_to_native(obj)
+
+def _ok(feeds):
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"feeds": _convert(feeds)})
+    }
+
+def _bad(msg, code=400):
+    return {
+        "statusCode": code,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps({"error": msg})
+    }
+
+def pk(user_id: str, privacy: int) -> str:
+    return f"{user_id}#{privacy}"
+
+# ---------- RDS: get list of IDs ----------
+def get_user_list(username: str, list_type: int):
+    """
+    list_type: 0 = friends/following, 1 = close_friends
+    Returns (user_list: List[str], last_index: int)
+    """
+    conn = _connect_rds()
+    try:
+        with conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT following, close_friends, last_idx, last_close_idx
+                    FROM "User"
+                    WHERE username = %s
+                """, (username,))
+                row = cur.fetchone()
+                if not row:
+                    return [], 0
+                if list_type == 0:
+                    return (row.get("following") or [], row.get("last_idx", 0))
+                return (row.get("close_friends") or [], row.get("last_close_idx", 0))
+    finally:
+        conn.close()
+
+# ---------- DynamoDB: fetch multi-user feed ----------
+def fetch_multi_page(user_ids, allowed_privacy, page=0, page_size=PAGE_SIZE, per_user_cap=PER_USER_CAP):
+    """
+    For each user in user_ids, query their partition (UserID=<uid>#<privacy>)
+    and collect up to per_user_cap newest items. Aggregate, sort desc by Timestamp,
+    then slice [page*page_size : +page_size].
+    """
+    if not user_ids:
+        return []
+
+    page = max(0, int(page or 0))
+    start = page * page_size
+    end = start + page_size
+
+    buf = []
+
+    for uid in user_ids:
+        pk_val = pk(uid, allowed_privacy)
+        print(f"[DEBUG] Querying uid={uid} privacy={allowed_privacy} PK={pk_val}")
+        resp = entries_tbl.query(
+            KeyConditionExpression=Key("UserID").eq(pk_val),
+            ProjectionExpression=_project_expr(),
+            ExpressionAttributeNames=_expr_names(),
+            ScanIndexForward=False,  # newest first
+            Limit=per_user_cap
+        )
+        items = resp.get("Items", [])
+        buf.extend(items)
+
+    buf.sort(key=lambda x: x.get("Timestamp", 0), reverse=True)
+    window = buf[start:end]
+    print(f"[DEBUG] Fetched total={len(buf)}, returning page[{start}:{end}] size={len(window)}")
+    return window
+
+# ---------- Handler ----------
+def lambda_handler(event, context):
+    """
+    Syntax (API Gateway):
+      GET /feed?mask=1&username=u01&friends_page=0
+        -> friends (privacy=1) page 0
+
+      GET /feed?mask=2&username=u01&close_page=0
+        -> close friends (privacy=2) page 0
+
+      GET /feed?mask=3&username=u01&friends_page=0&close_page=1
+        -> returns both, friends page 0 and close friends page 1
+
+    Params:
+      mask (int)     bitmask: 1=friends, 2=close, 3=both
+      username       owner whose lists we read from RDS
+      friends_page   0-based page index (10 items/page)
+      close_page     0-based page index (10 items/page)
+
+    Response:
+      {
+        "feeds": [ friends_items[], close_items[] ]
+      }
+    """
+    try:
+        print(f"[DEBUG] Incoming event: {json.dumps(event)[:600]}")
+        q = event.get("queryStringParameters") or {}
+
+        # optional JSON body merge
+        body = event.get("body")
+        if isinstance(body, str) and body.strip():
+            try:
+                qb = json.loads(body)
+                if isinstance(qb, dict):
+                    q.update(qb)
+            except json.JSONDecodeError:
+                print("[WARN] Body not valid JSON; ignoring.")
+
+        username = q.get("username")
+        mask = _to_int(q.get("mask"), 0)
+
+        if mask is None or mask < 0 or mask > 3:
+            return _bad("mask must be 0..3 (friends=1, close=2, both=3)")
+
+        if not username:
+            return _bad("username is required")
+
+        friends_page = _to_int(q.get("friends_page"), 0)
+        close_page   = _to_int(q.get("close_page"), 0)
+
+        want_friends = bool(mask & 0b01)
+        want_close   = bool(mask & 0b10)
+
+        print(f"[DEBUG] username={username} mask={mask} friends={want_friends} close={want_close} "
+              f"friends_page={friends_page} close_page={close_page}")
+
+        feeds = [[], []]  # [friends, close]
+
+        # Friends (privacy=1)
+        if want_friends:
+            ids, _last_idx = get_user_list(username, list_type=0)
+            print(f"[DEBUG] Friends list size={len(ids)}, content={ids}, last index={_last_idx}")
+            try:
+                feeds[0] = fetch_multi_page(ids, allowed_privacy=1, page=friends_page)
+            except Exception as e:
+                print(f"[ERROR] Friends fetch failed: {e}")
+                feeds[0] = []
+
+        # Close friends (privacy=2)
+        if want_close:
+            ids, _last_close_idx = get_user_list(username, list_type=1)
+            print(f"[DEBUG] Close friends list size={len(ids)}")
+            try:
+                feeds[1] = fetch_multi_page(ids, allowed_privacy=2, page=close_page)
+            except Exception as e:
+                print(f"[ERROR] Close fetch failed: {e}")
+                feeds[1] = []
+
+        print(f"[DEBUG] Final sizes -> friends={len(feeds[0])} close={len(feeds[1])}")
+        return _ok(feeds)
+
+    except Exception as e:
+        print(f"[FATAL] Unhandled error: {e}")
+        return _bad(f"Internal error: {str(e)}", code=500)

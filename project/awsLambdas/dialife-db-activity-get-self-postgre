@@ -1,0 +1,87 @@
+import json
+import os
+import psycopg2
+import psycopg2.extras
+
+# ---------- Postgres config ----------
+PG_HOST = os.environ.get("PG_HOST")
+PG_PORT = int(os.environ.get("PG_PORT", "5432"))
+PG_DB = os.environ.get("PG_DATABASE")
+PG_USER = os.environ.get("PG_USER")
+PG_PASS = os.environ.get("PG_PASSWORD")
+
+PG_TABLE = os.environ.get("PG_TABLE", "User")
+PG_USER_COL = os.environ.get("PG_USER_COL", "username")
+PG_EVENTS_COL = os.environ.get("PG_EVENTS_COL", "events_applied")
+
+def response(status: int, body: dict):
+    return {
+        "statusCode": status,
+        "headers": {"Content-Type": "application/json"},
+        "body": json.dumps(body),
+    }
+
+def getVals_from_pg(username: str):
+    conn = None
+    events_list = []
+    print(f"[DEBUG] Starting getVals_from_pg for username={username}")
+    try:
+        conn = psycopg2.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            dbname=PG_DB,
+            user=PG_USER,
+            password=PG_PASS,
+            connect_timeout=5,
+        )
+
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            query = f"""
+                SELECT {PG_EVENTS_COL}
+                FROM "{PG_TABLE}"
+                WHERE {PG_USER_COL} = %s
+                LIMIT 1
+            """
+            cur.execute(query, (username,))
+            row = cur.fetchone()
+            print(f"[DEBUG] Query result row: {row}")
+
+            if row and row.get(PG_EVENTS_COL):
+                for entry in row[PG_EVENTS_COL]:
+                    if "#" in entry:
+                        activity, valid_until_str = entry.split("#", 1)
+                        try:
+                            valid_until = int(valid_until_str)
+                        except ValueError:
+                            valid_until = valid_until_str
+                        events_list.append([activity, valid_until])
+    except Exception as e:
+        print(f"[ERROR] Exception in getVals_from_pg: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+    return events_list
+
+def lambda_handler(event, context):
+    print(f"[DEBUG] Incoming event: {event}")
+
+    # parse username from body
+    try:
+        body = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return response(400, {"error": "Invalid JSON body"})
+
+    username = body.get("UserID")
+    if not username or not isinstance(username, str):
+        return response(400, {"error": "Missing or invalid UserID"})
+    username = username.strip()
+
+    # fetch from Postgres
+    try:
+        pairs = getVals_from_pg(username)
+    except Exception as e:
+        return response(500, {"error": f"Database retrieval failed: {str(e)}"})
+
+    return response(200, {"pairs": pairs})

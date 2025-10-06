@@ -83,6 +83,8 @@ export default function ProfilePage() {
                   Number.isFinite(n)
                 )
               : undefined,
+            Comments: row.Comments,
+            Timestamp: tsNum < 1e12 ? tsNum * 1000 : tsNum,
           };
         });
 
